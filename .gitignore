@@ -1,0 +1,7 @@
+/.tmp/
+/.worktrees/
+/.claude/worktrees/
+/.claude/CLAUDE.md
+.env
+.playwright-mcp
+docs/superpowers
