@@ -95,11 +95,13 @@ func (r *SSEReader) LastEventType() string {
 // SSEWriter writes Server-Sent Events to an io.Writer.
 type SSEWriter struct {
 	w io.Writer
+	f http.Flusher // cached at construction time; nil if w does not implement http.Flusher
 }
 
 // NewSSEWriter creates a new SSEWriter wrapping the given io.Writer.
 func NewSSEWriter(w io.Writer) *SSEWriter {
-	return &SSEWriter{w: w}
+	f, _ := w.(http.Flusher)
+	return &SSEWriter{w: w, f: f}
 }
 
 // WriteData writes a data-only SSE event and flushes if possible.
@@ -134,7 +136,7 @@ func (w *SSEWriter) WriteDone() error {
 
 // flush flushes the underlying writer if it implements http.Flusher.
 func (w *SSEWriter) flush() {
-	if f, ok := w.w.(http.Flusher); ok {
-		f.Flush()
+	if w.f != nil {
+		w.f.Flush()
 	}
 }

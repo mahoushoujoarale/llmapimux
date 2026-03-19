@@ -59,18 +59,16 @@ func buildSendError(err error, attemptNum int) SendError {
 
 // retryLoopState holds all the shared state needed by the retry loop error-handling helper.
 type retryLoopState struct {
-	h               *Handler
-	w               http.ResponseWriter
-	r               *http.Request
-	req             *Request
-	body            []byte
-	info            RouteInfo
-	requestID       string
-	inboundProtocol Protocol
-	startTime       time.Time
-	stats           StatsReporter
-	target          RouteResult
-	attemptNum      int
+	h          *Handler
+	w          http.ResponseWriter
+	r          *http.Request
+	req        *Request
+	body       []byte
+	info       RouteInfo
+	startTime  time.Time
+	stats      StatsReporter
+	target     RouteResult
+	attemptNum int
 }
 
 // handleSendError processes a send error from either the streaming or non-streaming path.
@@ -92,11 +90,11 @@ func (s *retryLoopState) handleSendError(sendErr error, errPrefix string) (Route
 		s.h.codec.WriteError(s.w, statusCode, msg)
 		now := time.Now()
 		s.stats.OnComplete(s.r.Context(), CompleteEvent{
-			RequestID:        s.requestID,
+			RequestID:        s.info.RequestID,
 			Time:             now,
 			Status:           resolveCompletionStatus(s.r.Context().Err()),
 			Error:            s.r.Context().Err(),
-			InboundProtocol:  s.inboundProtocol,
+			InboundProtocol:  s.info.InboundProtocol,
 			OutboundProtocol: s.target.Protocol,
 			TTFB:             0,
 			TotalLatency:     now.Sub(s.startTime),
@@ -110,7 +108,7 @@ func (s *retryLoopState) handleSendError(sendErr error, errPrefix string) (Route
 
 	builtErr := buildSendError(sendErr, s.attemptNum)
 	s.stats.OnAttemptError(s.r.Context(), AttemptErrorEvent{
-		RequestID:  s.requestID,
+		RequestID:  s.info.RequestID,
 		AttemptNum: s.attemptNum,
 		Target:     s.target,
 		SendErr:    builtErr,
@@ -129,11 +127,11 @@ func (s *retryLoopState) handleSendError(sendErr error, errPrefix string) (Route
 		s.h.codec.WriteError(s.w, statusCode, msg)
 		now := time.Now()
 		s.stats.OnComplete(s.r.Context(), CompleteEvent{
-			RequestID:        s.requestID,
+			RequestID:        s.info.RequestID,
 			Time:             now,
 			Status:           resolveCompletionStatus(sendErr),
 			Error:            sendErr,
-			InboundProtocol:  s.inboundProtocol,
+			InboundProtocol:  s.info.InboundProtocol,
 			OutboundProtocol: s.target.Protocol,
 			TTFB:             0,
 			TotalLatency:     now.Sub(s.startTime),
@@ -228,18 +226,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 7. Retry loop
 	loop := &retryLoopState{
-		h:               h,
-		w:               w,
-		r:               r,
-		req:             req,
-		body:            body,
-		info:            info,
-		requestID:       requestID,
-		inboundProtocol: inboundProtocol,
-		startTime:       startTime,
-		stats:           stats,
-		target:          result,
-		attemptNum:      1,
+		h:          h,
+		w:          w,
+		r:          r,
+		req:        req,
+		body:       body,
+		info:       info,
+		startTime:  startTime,
+		stats:      stats,
+		target:     result,
+		attemptNum: 1,
 	}
 
 	for {

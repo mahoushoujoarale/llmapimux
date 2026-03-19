@@ -836,13 +836,7 @@ func convertIRPartToGemini(p ContentPart) gemini.Part {
 			// (i.e. a JSON object), not a plain string or scalar value.
 			var responseData json.RawMessage
 			if len(p.ToolResult.Content) > 0 {
-				var texts []string
-				for _, c := range p.ToolResult.Content {
-					if c.Type == ContentTypeText && c.Text != nil {
-						texts = append(texts, c.Text.Text)
-					}
-				}
-				wrapped, _ := json.Marshal(map[string]any{"result": strings.Join(texts, "")})
+				wrapped, _ := json.Marshal(map[string]any{"result": toolResultText(p.ToolResult)})
 				responseData = json.RawMessage(wrapped)
 			}
 			return gemini.Part{

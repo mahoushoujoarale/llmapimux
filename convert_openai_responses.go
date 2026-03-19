@@ -503,16 +503,10 @@ func encodeOaiRespMessage(m Message) []openairesponses.InputItem {
 		var items []openairesponses.InputItem
 		for _, p := range m.Content {
 			if p.Type == ContentTypeToolResult && p.ToolResult != nil {
-				var texts []string
-				for _, c := range p.ToolResult.Content {
-					if c.Type == ContentTypeText && c.Text != nil {
-						texts = append(texts, c.Text.Text)
-					}
-				}
 				items = append(items, openairesponses.InputItem{
 					Type:   "function_call_output",
 					CallID: p.ToolResult.ToolUseID,
-					Output: strings.Join(texts, ""),
+					Output: toolResultText(p.ToolResult),
 				})
 			} else {
 				msgParts = append(msgParts, p)
@@ -570,16 +564,10 @@ func encodeOaiRespMessage(m Message) []openairesponses.InputItem {
 		var items []openairesponses.InputItem
 		for _, p := range m.Content {
 			if p.Type == ContentTypeToolResult && p.ToolResult != nil {
-				var texts []string
-				for _, c := range p.ToolResult.Content {
-					if c.Type == ContentTypeText && c.Text != nil {
-						texts = append(texts, c.Text.Text)
-					}
-				}
 				items = append(items, openairesponses.InputItem{
 					Type:   "function_call_output",
 					CallID: p.ToolResult.ToolUseID,
-					Output: strings.Join(texts, ""),
+					Output: toolResultText(p.ToolResult),
 				})
 			}
 		}

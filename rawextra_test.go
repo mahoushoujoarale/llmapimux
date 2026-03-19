@@ -70,7 +70,7 @@ func TestCaptureRawExtra(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			extras := captureRawExtra([]byte(tt.body), tt.knownFields)
+			extras := extractRawExtra([]byte(tt.body), tt.knownFields)
 			if tt.wantNil {
 				if extras != nil {
 					t.Fatalf("extras = %v, want nil", extras)
@@ -179,7 +179,7 @@ func TestRawExtra_CaptureMergePreservationEquivalence(t *testing.T) {
 	known := map[string]bool{"model": true, "messages": true, "stream": true}
 	original := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":false,"service_tier":"priority","seed":42,"metadata":{"trace":"abc"}}`)
 
-	extras := captureRawExtra(original, known)
+	extras := extractRawExtra(original, known)
 	if extras == nil {
 		t.Fatal("extras is nil")
 	}

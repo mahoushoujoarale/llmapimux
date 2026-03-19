@@ -51,11 +51,6 @@ func extractRawExtra(body []byte, knownFields map[string]bool) map[string]json.R
 	return allFields
 }
 
-// captureRawExtra is a compatibility alias for extraction mechanics.
-func captureRawExtra(body []byte, knownFields map[string]bool) map[string]json.RawMessage {
-	return extractRawExtra(body, knownFields)
-}
-
 // populateRawExtraIfNeeded performs on-demand extraction and stores it on req.
 func populateRawExtraIfNeeded(req *Request, body []byte, knownFields map[string]bool) {
 	if req == nil || req.RawExtra != nil {

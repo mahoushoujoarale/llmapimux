@@ -1,7 +1,6 @@
 package llmapimux
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -35,7 +34,7 @@ func (e *UpstreamHTTPError) Error() string {
 }
 
 func newUpstreamHTTPError(op string, statusCode int, header http.Header, body []byte) error {
-	return fmt.Errorf("%s: %w", op, &UpstreamHTTPError{StatusCode: statusCode, Header: header.Clone(), Body: bytes.Clone(body)})
+	return fmt.Errorf("%s: %w", op, &UpstreamHTTPError{StatusCode: statusCode, Header: header.Clone(), Body: body})
 }
 
 // resolveUpstreamStatusCode returns the HTTP status code for an upstream error.

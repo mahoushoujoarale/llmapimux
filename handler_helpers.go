@@ -85,6 +85,18 @@ func generateRequestID() string {
 		uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
 }
 
+// toolResultText extracts and concatenates all text parts from a ToolResultContent.
+// Shared by OpenAI Chat, OpenAI Responses, and Gemini encoders.
+func toolResultText(result *ToolResultContent) string {
+	var texts []string
+	for _, c := range result.Content {
+		if c.Type == ContentTypeText && c.Text != nil {
+			texts = append(texts, c.Text.Text)
+		}
+	}
+	return strings.Join(texts, "")
+}
+
 // hasMediaContent returns true if any message or system prompt contains image or document parts.
 func hasMediaContent(req *Request) bool {
 	for _, part := range req.SystemPrompt {

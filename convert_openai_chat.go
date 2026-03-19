@@ -9,6 +9,42 @@ import (
 	"github.com/llmapimux/llmapimux/protocol/openaichat"
 )
 
+// decodeOpenAIChatFinishReason maps an OpenAI Chat finish_reason string to an IR StopReason.
+func decodeOpenAIChatFinishReason(s string) StopReason {
+	switch s {
+	case "stop":
+		return StopReasonEndTurn
+	case "length":
+		return StopReasonMaxTokens
+	case "tool_calls":
+		return StopReasonToolUse
+	case "content_filter":
+		return StopReasonContentFilter
+	default:
+		return StopReason(s)
+	}
+}
+
+// encodeOpenAIChatFinishReason maps an IR StopReason to an OpenAI Chat finish_reason string.
+func encodeOpenAIChatFinishReason(r StopReason) string {
+	switch r {
+	case StopReasonEndTurn:
+		return "stop"
+	case StopReasonMaxTokens:
+		return "length"
+	case StopReasonToolUse:
+		return "tool_calls"
+	case StopReasonContentFilter:
+		return "content_filter"
+	case StopReasonStopSequence:
+		return "stop"
+	case StopReasonPauseTurn:
+		return "stop"
+	default:
+		return string(r)
+	}
+}
+
 func decodeOpenAIChatUsage(u *openaichat.ChatUsage) Usage {
 	usage := Usage{
 		InputTokens:  u.PromptTokens,
@@ -531,14 +567,7 @@ func encodeOpenAIChatToolResultPart(p ContentPart) (openaichat.ChatMessage, erro
 		Role:       "tool",
 		ToolCallID: p.ToolResult.ToolUseID,
 	}
-	var texts []string
-	for _, c := range p.ToolResult.Content {
-		if c.Type == ContentTypeText && c.Text != nil {
-			texts = append(texts, c.Text.Text)
-		}
-	}
-	text := strings.Join(texts, "")
-	contentJSON, err := json.Marshal(text)
+	contentJSON, err := json.Marshal(toolResultText(p.ToolResult))
 	if err != nil {
 		return openaichat.ChatMessage{}, fmt.Errorf("marshal tool content: %w", err)
 	}
@@ -606,15 +635,7 @@ func encodeOpenAIChatToolMessage(m Message) (openaichat.ChatMessage, error) {
 	for _, p := range m.Content {
 		if p.Type == ContentTypeToolResult && p.ToolResult != nil {
 			msg.ToolCallID = p.ToolResult.ToolUseID
-			// Extract text from the result content
-			var texts []string
-			for _, c := range p.ToolResult.Content {
-				if c.Type == ContentTypeText && c.Text != nil {
-					texts = append(texts, c.Text.Text)
-				}
-			}
-			text := strings.Join(texts, "")
-			contentJSON, err := json.Marshal(text)
+			contentJSON, err := json.Marshal(toolResultText(p.ToolResult))
 			if err != nil {
 				return openaichat.ChatMessage{}, fmt.Errorf("marshal tool content: %w", err)
 			}
@@ -754,18 +775,7 @@ func DecodeOpenAIChatResponse(body []byte) (*Response, error) {
 
 		// Finish reason
 		if choice.FinishReason != nil {
-			switch *choice.FinishReason {
-			case "stop":
-				resp.StopReason = StopReasonEndTurn
-			case "length":
-				resp.StopReason = StopReasonMaxTokens
-			case "tool_calls":
-				resp.StopReason = StopReasonToolUse
-			case "content_filter":
-				resp.StopReason = StopReasonContentFilter
-			default:
-				resp.StopReason = StopReason(*choice.FinishReason)
-			}
+			resp.StopReason = decodeOpenAIChatFinishReason(*choice.FinishReason)
 		}
 		// Some providers return finish_reason "stop" even when tool calls are present.
 		// Normalize to tool_use so downstream consumers can rely on stop reason.
@@ -838,23 +848,7 @@ func EncodeOpenAIChatResponse(resp *Response) ([]byte, error) {
 	}
 
 	// Finish reason
-	var finishReason string
-	switch resp.StopReason {
-	case StopReasonEndTurn:
-		finishReason = "stop"
-	case StopReasonMaxTokens:
-		finishReason = "length"
-	case StopReasonToolUse:
-		finishReason = "tool_calls"
-	case StopReasonContentFilter:
-		finishReason = "content_filter"
-	case StopReasonStopSequence:
-		finishReason = "stop"
-	case StopReasonPauseTurn:
-		finishReason = "stop"
-	default:
-		finishReason = string(resp.StopReason)
-	}
+	finishReason := encodeOpenAIChatFinishReason(resp.StopReason)
 
 	raw.Choices = []openaichat.ChatChoice{
 		{
@@ -904,19 +898,7 @@ func DecodeOpenAIChatStreamChunk(data []byte) (*StreamEvent, error) {
 
 	// Check for finish_reason
 	if choice.FinishReason != nil && *choice.FinishReason != "" {
-		var stopReason StopReason
-		switch *choice.FinishReason {
-		case "stop":
-			stopReason = StopReasonEndTurn
-		case "length":
-			stopReason = StopReasonMaxTokens
-		case "tool_calls":
-			stopReason = StopReasonToolUse
-		case "content_filter":
-			stopReason = StopReasonContentFilter
-		default:
-			stopReason = StopReason(*choice.FinishReason)
-		}
+		stopReason := decodeOpenAIChatFinishReason(*choice.FinishReason)
 		event := &StreamEvent{
 			Type:       StreamEventStop,
 			StopReason: &stopReason,
@@ -1072,24 +1054,9 @@ func EncodeOpenAIChatStreamChunk(event *StreamEvent) ([]byte, error) {
 		}
 
 	case StreamEventStop:
-		var finishReason string
+		finishReason := "stop"
 		if event.StopReason != nil {
-			switch *event.StopReason {
-			case StopReasonEndTurn:
-				finishReason = "stop"
-			case StopReasonMaxTokens:
-				finishReason = "length"
-			case StopReasonToolUse:
-				finishReason = "tool_calls"
-			case StopReasonContentFilter:
-				finishReason = "content_filter"
-			case StopReasonPauseTurn:
-				finishReason = "stop"
-			default:
-				finishReason = string(*event.StopReason)
-			}
-		} else {
-			finishReason = "stop"
+			finishReason = encodeOpenAIChatFinishReason(*event.StopReason)
 		}
 		raw.Choices = []openaichat.ChatChoice{
 			{

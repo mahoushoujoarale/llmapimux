@@ -9,6 +9,42 @@ import (
 	anthropic "github.com/llmapimux/llmapimux/protocol/anthropic"
 )
 
+// decodeAnthropicStopReason maps an Anthropic wire stop_reason string to an IR StopReason.
+func decodeAnthropicStopReason(s string) StopReason {
+	switch s {
+	case "end_turn":
+		return StopReasonEndTurn
+	case "max_tokens":
+		return StopReasonMaxTokens
+	case "stop_sequence":
+		return StopReasonStopSequence
+	case "tool_use":
+		return StopReasonToolUse
+	case "pause_turn":
+		return StopReasonPauseTurn
+	default:
+		return StopReason(s)
+	}
+}
+
+// encodeAnthropicStopReason maps an IR StopReason to an Anthropic wire stop_reason string.
+func encodeAnthropicStopReason(r StopReason) string {
+	switch r {
+	case StopReasonEndTurn:
+		return "end_turn"
+	case StopReasonMaxTokens:
+		return "max_tokens"
+	case StopReasonStopSequence:
+		return "stop_sequence"
+	case StopReasonToolUse:
+		return "tool_use"
+	case StopReasonPauseTurn:
+		return "pause_turn"
+	default:
+		return string(r)
+	}
+}
+
 // anthropicCitationWire is the wire format for Anthropic citation JSON objects.
 type anthropicCitationWire struct {
 	Type           string `json:"type,omitempty"`
@@ -676,20 +712,7 @@ func DecodeAnthropicResponse(body []byte) (*Response, error) {
 	}
 
 	// Stop reason
-	switch raw.StopReason {
-	case "end_turn":
-		resp.StopReason = StopReasonEndTurn
-	case "max_tokens":
-		resp.StopReason = StopReasonMaxTokens
-	case "stop_sequence":
-		resp.StopReason = StopReasonStopSequence
-	case "tool_use":
-		resp.StopReason = StopReasonToolUse
-	case "pause_turn":
-		resp.StopReason = StopReasonPauseTurn
-	default:
-		resp.StopReason = StopReason(raw.StopReason)
-	}
+	resp.StopReason = decodeAnthropicStopReason(raw.StopReason)
 
 	if raw.StopSequence != nil {
 		resp.StopSequence = *raw.StopSequence
@@ -814,21 +837,7 @@ func DecodeAnthropicStreamEvent(eventType string, data []byte) (*StreamEvent, er
 		if err := json.Unmarshal(data, &raw); err != nil {
 			return nil, fmt.Errorf("decode anthropic stream message_delta: %w", err)
 		}
-		var stopReason StopReason
-		switch raw.Delta.StopReason {
-		case "end_turn":
-			stopReason = StopReasonEndTurn
-		case "max_tokens":
-			stopReason = StopReasonMaxTokens
-		case "stop_sequence":
-			stopReason = StopReasonStopSequence
-		case "tool_use":
-			stopReason = StopReasonToolUse
-		case "pause_turn":
-			stopReason = StopReasonPauseTurn
-		default:
-			stopReason = StopReason(raw.Delta.StopReason)
-		}
+		stopReason := decodeAnthropicStopReason(raw.Delta.StopReason)
 		usage := Usage{
 			OutputTokens: raw.Usage.OutputTokens,
 		}
@@ -926,25 +935,10 @@ func EncodeAnthropicStreamEvent(event *StreamEvent) (string, []byte, error) {
 	case StreamEventDelta:
 		// message_delta (stop reason) takes priority over content delta
 		if event.StopReason != nil {
-			var stopReason string
-			switch *event.StopReason {
-			case StopReasonEndTurn:
-				stopReason = "end_turn"
-			case StopReasonMaxTokens:
-				stopReason = "max_tokens"
-			case StopReasonStopSequence:
-				stopReason = "stop_sequence"
-			case StopReasonToolUse:
-				stopReason = "tool_use"
-			case StopReasonPauseTurn:
-				stopReason = "pause_turn"
-			default:
-				stopReason = string(*event.StopReason)
-			}
 			raw := anthropic.StreamMessageDelta{
 				Type: "message_delta",
 				Delta: anthropic.StreamMessageDeltaInner{
-					StopReason: stopReason,
+					StopReason: encodeAnthropicStopReason(*event.StopReason),
 				},
 			}
 			if event.Usage != nil {
@@ -1082,20 +1076,7 @@ func EncodeAnthropicResponse(resp *Response) ([]byte, error) {
 	raw.Content = blocks
 
 	// Stop reason (reverse mapping)
-	switch resp.StopReason {
-	case StopReasonEndTurn:
-		raw.StopReason = "end_turn"
-	case StopReasonMaxTokens:
-		raw.StopReason = "max_tokens"
-	case StopReasonStopSequence:
-		raw.StopReason = "stop_sequence"
-	case StopReasonToolUse:
-		raw.StopReason = "tool_use"
-	case StopReasonPauseTurn:
-		raw.StopReason = "pause_turn"
-	default:
-		raw.StopReason = string(resp.StopReason)
-	}
+	raw.StopReason = encodeAnthropicStopReason(resp.StopReason)
 
 	if resp.StopSequence != "" {
 		raw.StopSequence = &resp.StopSequence
