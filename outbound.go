@@ -1,9 +1,11 @@
 package llmapimux
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -126,4 +128,70 @@ func NewClient(protocol Protocol) Client {
 	default:
 		return nil
 	}
+}
+
+// doSend performs the shared HTTP request/response cycle for non-streaming outbound calls.
+// body is the encoded (and OutboundExtra-merged) request body.
+func doSend(ctx context.Context, httpClient *http.Client, cfg OutboundConfig, body []byte, url string, headers [][2]string, errPrefix string) ([]byte, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("%s new request: %w", errPrefix, err)
+	}
+
+	applyExtraHeaders(httpReq, cfg)
+	for _, h := range headers {
+		httpReq.Header.Set(h[0], h[1])
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := httpClientForProxy(httpClient, cfg.ProxyURL).Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("%s send: %w", errPrefix, err)
+	}
+	defer httpResp.Body.Close()
+
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("%s read response: %w", errPrefix, err)
+	}
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		return nil, newUpstreamHTTPError(errPrefix+" status", httpResp.StatusCode, httpResp.Header, respBody)
+	}
+
+	return respBody, nil
+}
+
+// doStreamSetup performs the shared HTTP setup for streaming outbound calls.
+// Returns the HTTP response with body still open; caller must read SSE events and close the body.
+func doStreamSetup(ctx context.Context, httpClient *http.Client, cfg OutboundConfig, body []byte, url string, headers [][2]string, errPrefix string) (*http.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("%s new stream request: %w", errPrefix, err)
+	}
+
+	applyExtraHeaders(httpReq, cfg)
+	for _, h := range headers {
+		httpReq.Header.Set(h[0], h[1])
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := httpClientForProxy(httpClient, cfg.ProxyURL).Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("%s send stream: %w", errPrefix, err)
+	}
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		errBody, _ := io.ReadAll(httpResp.Body)
+		httpResp.Body.Close()
+		return nil, newUpstreamHTTPError(errPrefix+" stream status", httpResp.StatusCode, httpResp.Header, errBody)
+	}
+
+	ct := httpResp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "text/event-stream") {
+		httpResp.Body.Close()
+		return nil, fmt.Errorf("%s stream: unexpected Content-Type %q", errPrefix, ct)
+	}
+
+	return httpResp, nil
 }

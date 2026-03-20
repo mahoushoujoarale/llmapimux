@@ -57,7 +57,8 @@ func buildSendError(err error, attemptNum int) SendError {
 	return se
 }
 
-// retryLoopState holds all the shared state needed by the retry loop error-handling helper.
+// retryLoopState holds all the shared state needed by the retry loop and its
+// helper methods (error handling, streaming, non-streaming response writing).
 type retryLoopState struct {
 	h          *Handler
 	w          http.ResponseWriter
@@ -69,6 +70,27 @@ type retryLoopState struct {
 	stats      StatsReporter
 	target     RouteResult
 	attemptNum int
+}
+
+// writeErrorAndComplete writes an error response to the client and fires OnComplete.
+// Used by handleSendError for the two terminal error paths (context canceled, no more fallback targets).
+func (s *retryLoopState) writeErrorAndComplete(statusCode int, msg string, compErr error) {
+	s.h.codec.WriteError(s.w, statusCode, msg)
+	now := time.Now()
+	s.stats.OnComplete(s.r.Context(), CompleteEvent{
+		RequestID:        s.info.RequestID,
+		Time:             now,
+		Status:           resolveCompletionStatus(compErr),
+		Error:            compErr,
+		InboundProtocol:  s.info.InboundProtocol,
+		OutboundProtocol: s.target.Protocol,
+		TTFB:             0,
+		TotalLatency:     now.Sub(s.startTime),
+		Usage:            Usage{},
+		OutputThroughput: 0,
+		IRResponse:       nil,
+		AttemptNum:       s.attemptNum,
+	})
 }
 
 // handleSendError processes a send error from either the streaming or non-streaming path.
@@ -87,22 +109,7 @@ func (s *retryLoopState) handleSendError(sendErr error, errPrefix string) (Route
 		if sendErr != nil {
 			msg = errPrefix + sendErr.Error()
 		}
-		s.h.codec.WriteError(s.w, statusCode, msg)
-		now := time.Now()
-		s.stats.OnComplete(s.r.Context(), CompleteEvent{
-			RequestID:        s.info.RequestID,
-			Time:             now,
-			Status:           resolveCompletionStatus(s.r.Context().Err()),
-			Error:            s.r.Context().Err(),
-			InboundProtocol:  s.info.InboundProtocol,
-			OutboundProtocol: s.target.Protocol,
-			TTFB:             0,
-			TotalLatency:     now.Sub(s.startTime),
-			Usage:            Usage{},
-			OutputThroughput: 0,
-			IRResponse:       nil,
-			AttemptNum:       s.attemptNum,
-		})
+		s.writeErrorAndComplete(statusCode, msg, s.r.Context().Err())
 		return RouteResult{}, false
 	}
 
@@ -124,22 +131,7 @@ func (s *retryLoopState) handleSendError(sendErr error, errPrefix string) (Route
 		if sendErr != nil {
 			msg = errPrefix + sendErr.Error()
 		}
-		s.h.codec.WriteError(s.w, statusCode, msg)
-		now := time.Now()
-		s.stats.OnComplete(s.r.Context(), CompleteEvent{
-			RequestID:        s.info.RequestID,
-			Time:             now,
-			Status:           resolveCompletionStatus(sendErr),
-			Error:            sendErr,
-			InboundProtocol:  s.info.InboundProtocol,
-			OutboundProtocol: s.target.Protocol,
-			TTFB:             0,
-			TotalLatency:     now.Sub(s.startTime),
-			Usage:            Usage{},
-			OutputThroughput: 0,
-			IRResponse:       nil,
-			AttemptNum:       s.attemptNum,
-		})
+		s.writeErrorAndComplete(statusCode, msg, sendErr)
 		return RouteResult{}, false
 	}
 
@@ -271,7 +263,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			// SendStream succeeded — commit to streaming. No more fallback.
 			h.router.OnSuccess(r.Context(), info, loop.target)
-			h.handleStreaming(w, r, req, ch, loop.target.Protocol, inboundProtocol, requestID, startTime, stats, loop.attemptNum)
+			loop.handleStreaming(ch)
 			return
 		}
 
@@ -287,20 +279,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Non-streaming success — record TTFB immediately after Send returns.
 		firstByteTime := time.Now()
 		h.router.OnSuccess(r.Context(), info, loop.target)
-		h.handleNonStreaming(w, r, req, resp, loop.target.Protocol, inboundProtocol, requestID, startTime, firstByteTime, stats, loop.attemptNum)
+		loop.handleNonStreaming(resp, firstByteTime)
 		return
 	}
 }
 
-func (h *Handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, req *Request, resp *Response, outboundProtocol Protocol, inboundProtocol Protocol, requestID string, startTime time.Time, firstByteTime time.Time, stats StatsReporter, attemptNum int) {
+func (s *retryLoopState) handleNonStreaming(resp *Response, firstByteTime time.Time) {
 	var (
 		err  error
-		ttfb = firstByteTime.Sub(startTime)
+		ttfb = firstByteTime.Sub(s.startTime)
 	)
 
 	defer func() {
 		now := time.Now()
-		totalLatency := now.Sub(startTime)
+		totalLatency := now.Sub(s.startTime)
 		usage := Usage{}
 		stopReason := StopReason("")
 		actualModel := ""
@@ -313,13 +305,13 @@ func (h *Handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, req
 		if totalLatency > 0 {
 			throughput = float64(usage.OutputTokens) / totalLatency.Seconds()
 		}
-		stats.OnComplete(r.Context(), CompleteEvent{
-			RequestID:        requestID,
+		s.stats.OnComplete(s.r.Context(), CompleteEvent{
+			RequestID:        s.info.RequestID,
 			Time:             now,
 			Status:           resolveCompletionStatus(err),
 			Error:            err,
-			InboundProtocol:  inboundProtocol,
-			OutboundProtocol: outboundProtocol,
+			InboundProtocol:  s.info.InboundProtocol,
+			OutboundProtocol: s.target.Protocol,
 			TTFB:             ttfb,
 			TotalLatency:     totalLatency,
 			Usage:            usage,
@@ -327,28 +319,28 @@ func (h *Handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, req
 			StopReason:       stopReason,
 			ActualModel:      actualModel,
 			IRResponse:       resp,
-			AttemptNum:       attemptNum,
+			AttemptNum:       s.attemptNum,
 		})
 	}()
 
-	stats.OnFirstByte(r.Context(), FirstByteEvent{
-		RequestID: requestID,
+	s.stats.OnFirstByte(s.r.Context(), FirstByteEvent{
+		RequestID: s.info.RequestID,
 		Time:      firstByteTime,
 		TTFB:      ttfb,
 	})
 
-	data, err := h.codec.EncodeResponse(resp)
+	data, err := s.h.codec.EncodeResponse(resp)
 	if err != nil {
-		h.codec.WriteError(w, 502, "failed to encode response: "+err.Error())
+		s.h.codec.WriteError(s.w, 502, "failed to encode response: "+err.Error())
 		return
 	}
 	// Merge RawExtra only for same-protocol roundtrip
-	if req.InboundProtocol == outboundProtocol {
-		data, _ = mergeRawExtra(data, req.RawExtra, h.codec.KnownFields())
+	if s.req.InboundProtocol == s.target.Protocol {
+		data, _ = mergeRawExtra(data, s.req.RawExtra, s.h.codec.KnownFields())
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, err = w.Write(data)
+	s.w.Header().Set("Content-Type", "application/json")
+	s.w.WriteHeader(http.StatusOK)
+	_, err = s.w.Write(data)
 }
 
 func resolveCompletionStatus(err error) CompletionStatus {
@@ -370,7 +362,8 @@ type streamSummary struct {
 	streamErr   error
 }
 
-func (h *Handler) wrapStreamForStats(ctx context.Context, ch <-chan StreamResult, requestID string, startTime time.Time, stats StatsReporter) (<-chan StreamResult, <-chan streamSummary, chan struct{}) {
+func (s *retryLoopState) wrapStreamForStats(ch <-chan StreamResult) (<-chan StreamResult, <-chan streamSummary, chan struct{}) {
+	ctx := s.r.Context()
 	wrappedCh := make(chan StreamResult)
 	summaryDone := make(chan streamSummary, 1)
 	stopForwarding := make(chan struct{})
@@ -379,7 +372,7 @@ func (h *Handler) wrapStreamForStats(ctx context.Context, ch <-chan StreamResult
 		defer close(wrappedCh)
 		var summary streamSummary
 		firstByteSent := false
-		lastChunkTime := startTime
+		lastChunkTime := s.startTime
 		seq := 0
 
 		for {
@@ -423,9 +416,9 @@ func (h *Handler) wrapStreamForStats(ctx context.Context, ch <-chan StreamResult
 				now := time.Now()
 				if !firstByteSent {
 					firstByteSent = true
-					summary.ttfb = now.Sub(startTime)
-					stats.OnFirstByte(ctx, FirstByteEvent{
-						RequestID: requestID,
+					summary.ttfb = now.Sub(s.startTime)
+					s.stats.OnFirstByte(ctx, FirstByteEvent{
+						RequestID: s.info.RequestID,
 						Time:      now,
 						TTFB:      summary.ttfb,
 					})
@@ -436,11 +429,11 @@ func (h *Handler) wrapStreamForStats(ctx context.Context, ch <-chan StreamResult
 				if seq > 1 {
 					interChunkDelay = now.Sub(lastChunkTime)
 				}
-				stats.OnStreamChunk(ctx, StreamChunkEvent{
-					RequestID:       requestID,
+				s.stats.OnStreamChunk(ctx, StreamChunkEvent{
+					RequestID:       s.info.RequestID,
 					Time:            now,
 					SequenceNum:     seq,
-					ElapsedTime:     now.Sub(startTime),
+					ElapsedTime:     now.Sub(s.startTime),
 					InterChunkDelay: interChunkDelay,
 					IREvent:         result.Event,
 				})
@@ -475,35 +468,35 @@ func (h *Handler) wrapStreamForStats(ctx context.Context, ch <-chan StreamResult
 	return wrappedCh, summaryDone, stopForwarding
 }
 
-func (h *Handler) handleStreaming(w http.ResponseWriter, r *http.Request, _ *Request, ch <-chan StreamResult, outboundProtocol Protocol, inboundProtocol Protocol, requestID string, startTime time.Time, stats StatsReporter, attemptNum int) {
-	wrappedCh, summaryDone, stopForwarding := h.wrapStreamForStats(r.Context(), ch, requestID, startTime, stats)
+func (s *retryLoopState) handleStreaming(ch <-chan StreamResult) {
+	wrappedCh, summaryDone, stopForwarding := s.wrapStreamForStats(ch)
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.WriteHeader(http.StatusOK)
-	h.codec.WriteStreamingResponse(NewSSEWriter(w), wrappedCh)
+	s.w.Header().Set("Content-Type", "text/event-stream")
+	s.w.Header().Set("Cache-Control", "no-cache")
+	s.w.WriteHeader(http.StatusOK)
+	s.h.codec.WriteStreamingResponse(NewSSEWriter(s.w), wrappedCh)
 
 	close(stopForwarding)
 	summary := <-summaryDone
 	err := summary.streamErr
-	if ctxErr := r.Context().Err(); errors.Is(ctxErr, context.Canceled) || errors.Is(ctxErr, context.DeadlineExceeded) {
+	if ctxErr := s.r.Context().Err(); errors.Is(ctxErr, context.Canceled) || errors.Is(ctxErr, context.DeadlineExceeded) {
 		err = ctxErr
 	}
 
 	now := time.Now()
-	totalLatency := now.Sub(startTime)
+	totalLatency := now.Sub(s.startTime)
 	throughput := 0.0
 	if totalLatency > 0 {
 		throughput = float64(summary.usage.OutputTokens) / totalLatency.Seconds()
 	}
 
-	stats.OnComplete(r.Context(), CompleteEvent{
-		RequestID:        requestID,
+	s.stats.OnComplete(s.r.Context(), CompleteEvent{
+		RequestID:        s.info.RequestID,
 		Time:             now,
 		Status:           resolveCompletionStatus(err),
 		Error:            err,
-		InboundProtocol:  inboundProtocol,
-		OutboundProtocol: outboundProtocol,
+		InboundProtocol:  s.info.InboundProtocol,
+		OutboundProtocol: s.target.Protocol,
 		TTFB:             summary.ttfb,
 		TotalLatency:     totalLatency,
 		Usage:            summary.usage,
@@ -511,7 +504,7 @@ func (h *Handler) handleStreaming(w http.ResponseWriter, r *http.Request, _ *Req
 		StopReason:       summary.stopReason,
 		ActualModel:      summary.actualModel,
 		IRResponse:       nil,
-		AttemptNum:       attemptNum,
+		AttemptNum:       s.attemptNum,
 	})
 }
 

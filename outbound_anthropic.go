@@ -1,12 +1,10 @@
 package llmapimux
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 // AnthropicClient sends IR Requests to the Anthropic Messages API.
@@ -27,32 +25,13 @@ func (c *AnthropicClient) Send(ctx context.Context, req *Request, cfg OutboundCo
 		}
 	}
 
-	url := trimBaseURL(cfg.BaseURL) + "/v1/messages"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	respBody, err := doSend(ctx, c.HTTPClient, cfg, body,
+		trimBaseURL(cfg.BaseURL)+"/v1/messages",
+		[][2]string{{"x-api-key", cfg.APIKey}, {"anthropic-version", "2023-06-01"}},
+		"anthropic outbound")
 	if err != nil {
-		return nil, fmt.Errorf("anthropic outbound new request: %w", err)
+		return nil, err
 	}
-
-	applyExtraHeaders(httpReq, cfg)
-	httpReq.Header.Set("x-api-key", cfg.APIKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := httpClientForProxy(c.HTTPClient, cfg.ProxyURL).Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("anthropic outbound send: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("anthropic outbound read response: %w", err)
-	}
-
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return nil, newUpstreamHTTPError("anthropic outbound status", httpResp.StatusCode, httpResp.Header, respBody)
-	}
-
 	return DecodeAnthropicResponse(respBody)
 }
 
@@ -72,32 +51,12 @@ func (c *AnthropicClient) SendStream(ctx context.Context, req *Request, cfg Outb
 		}
 	}
 
-	url := trimBaseURL(cfg.BaseURL) + "/v1/messages"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpResp, err := doStreamSetup(ctx, c.HTTPClient, cfg, body,
+		trimBaseURL(cfg.BaseURL)+"/v1/messages",
+		[][2]string{{"x-api-key", cfg.APIKey}, {"anthropic-version", "2023-06-01"}},
+		"anthropic outbound")
 	if err != nil {
-		return nil, fmt.Errorf("anthropic outbound new stream request: %w", err)
-	}
-
-	applyExtraHeaders(httpReq, cfg)
-	httpReq.Header.Set("x-api-key", cfg.APIKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := httpClientForProxy(c.HTTPClient, cfg.ProxyURL).Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("anthropic outbound send stream: %w", err)
-	}
-
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		body, _ := io.ReadAll(httpResp.Body)
-		httpResp.Body.Close()
-		return nil, newUpstreamHTTPError("anthropic outbound stream status", httpResp.StatusCode, httpResp.Header, body)
-	}
-
-	ct := httpResp.Header.Get("Content-Type")
-	if !strings.Contains(ct, "text/event-stream") {
-		httpResp.Body.Close()
-		return nil, fmt.Errorf("anthropic outbound stream: unexpected Content-Type %q", ct)
+		return nil, err
 	}
 
 	ch := make(chan StreamResult)

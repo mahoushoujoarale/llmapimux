@@ -1,12 +1,10 @@
 package llmapimux
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 // OpenAIResponsesClient sends IR Requests to the OpenAI Responses API.
@@ -27,31 +25,13 @@ func (c *OpenAIResponsesClient) Send(ctx context.Context, req *Request, cfg Outb
 		}
 	}
 
-	url := trimBaseURL(cfg.BaseURL) + "/v1/responses"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	respBody, err := doSend(ctx, c.HTTPClient, cfg, body,
+		trimBaseURL(cfg.BaseURL)+"/v1/responses",
+		[][2]string{{"Authorization", "Bearer " + cfg.APIKey}},
+		"openai responses outbound")
 	if err != nil {
-		return nil, fmt.Errorf("openai responses outbound new request: %w", err)
+		return nil, err
 	}
-
-	applyExtraHeaders(httpReq, cfg)
-	httpReq.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := httpClientForProxy(c.HTTPClient, cfg.ProxyURL).Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("openai responses outbound send: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("openai responses outbound read response: %w", err)
-	}
-
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return nil, newUpstreamHTTPError("openai responses outbound status", httpResp.StatusCode, httpResp.Header, respBody)
-	}
-
 	return DecodeOpenAIResponsesResponse(respBody)
 }
 
@@ -71,31 +51,12 @@ func (c *OpenAIResponsesClient) SendStream(ctx context.Context, req *Request, cf
 		}
 	}
 
-	url := trimBaseURL(cfg.BaseURL) + "/v1/responses"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpResp, err := doStreamSetup(ctx, c.HTTPClient, cfg, body,
+		trimBaseURL(cfg.BaseURL)+"/v1/responses",
+		[][2]string{{"Authorization", "Bearer " + cfg.APIKey}},
+		"openai responses outbound")
 	if err != nil {
-		return nil, fmt.Errorf("openai responses outbound new stream request: %w", err)
-	}
-
-	applyExtraHeaders(httpReq, cfg)
-	httpReq.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := httpClientForProxy(c.HTTPClient, cfg.ProxyURL).Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("openai responses outbound send stream: %w", err)
-	}
-
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		body, _ := io.ReadAll(httpResp.Body)
-		httpResp.Body.Close()
-		return nil, newUpstreamHTTPError("openai responses outbound stream status", httpResp.StatusCode, httpResp.Header, body)
-	}
-
-	ct := httpResp.Header.Get("Content-Type")
-	if !strings.Contains(ct, "text/event-stream") {
-		httpResp.Body.Close()
-		return nil, fmt.Errorf("openai responses outbound stream: unexpected Content-Type %q", ct)
+		return nil, err
 	}
 
 	ch := make(chan StreamResult)
