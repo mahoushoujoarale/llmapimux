@@ -785,6 +785,85 @@ func TestIntegration_AnthropicPauseTurn_To_OpenAIChat_DowngradesStopReason(t *te
 	}
 }
 
+// TestIntegration_AnthropicToOpenAIResponses_WebSearchStreamingRoundTrip
+// exercises the full streaming web_search path: Anthropic stream request →
+// OpenAI Responses SSE upstream → Anthropic SSE response. The upstream emits
+// a web_search_call with progress hints, then a follow-up message. The test
+// asserts both the server_tool_use and the web_search_tool_result blocks
+// appear in the downstream Anthropic stream with correctly paired start/stop
+// events, and that progress hints are silently absorbed.
+func TestIntegration_AnthropicToOpenAIResponses_WebSearchStreamingRoundTrip(t *testing.T) {
+	openaiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+
+		writeEvent := func(event, data string) {
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
+			flusher.Flush()
+		}
+
+		writeEvent("response.created", `{"type":"response.created","response":{"id":"resp_ws","model":"gpt-5","status":"in_progress"}}`)
+		writeEvent("response.output_item.added", `{"type":"response.output_item.added","output_index":0,"item":{"type":"web_search_call","id":"ws_1"}}`)
+		writeEvent("response.web_search_call.in_progress", `{"type":"response.web_search_call.in_progress","output_index":0,"item_id":"ws_1"}`)
+		writeEvent("response.web_search_call.searching", `{"type":"response.web_search_call.searching","output_index":0,"item_id":"ws_1"}`)
+		writeEvent("response.web_search_call.completed", `{"type":"response.web_search_call.completed","output_index":0,"item_id":"ws_1"}`)
+		writeEvent("response.output_item.done", `{"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"qwer1234","sources":[{"type":"url","url":"https://openai.com"}]}}}`)
+		writeEvent("response.output_item.added", `{"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant"}}`)
+		writeEvent("response.output_text.delta", `{"type":"response.output_text.delta","output_index":1,"delta":"Found it."}`)
+		writeEvent("response.output_item.done", `{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Found it."}]}}`)
+		writeEvent("response.completed", `{"type":"response.completed","response":{"id":"resp_ws","model":"gpt-5","status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer openaiServer.Close()
+
+	mux := NewMux(&staticRouter{result: RouteResult{
+		Protocol: ProtocolOpenAIResponses,
+		BaseURL:  openaiServer.URL,
+		APIKey:   "sk-openai",
+		Model:    "gpt-5",
+	}})
+
+	reqBody := `{
+		"model":"claude-sonnet-4-20250514",
+		"max_tokens":256,
+		"stream":true,
+		"messages":[{"role":"user","content":[{"type":"text","text":"Search for qwer1234"}]}],
+		"tools":[{"name":"web_search","type":"web_search_20250305"}],
+		"tool_choice":{"type":"tool","name":"web_search"}
+	}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	mux.AnthropicHandler().ServeHTTP(w, req)
+
+	respBody := w.Body.String()
+
+	// Downstream must carry the server_tool_use block (otherwise Anthropic
+	// clients would see a dangling tool_use_id on the result) and the
+	// web_search_tool_result block. Both must be paired with a stop.
+	if !strings.Contains(respBody, `"type":"server_tool_use"`) {
+		t.Errorf("missing server_tool_use block in downstream stream:\n%s", respBody)
+	}
+	if !strings.Contains(respBody, `"type":"web_search_tool_result"`) {
+		t.Errorf("missing web_search_tool_result block in downstream stream:\n%s", respBody)
+	}
+	if strings.Count(respBody, "event: content_block_start") < 3 {
+		t.Errorf("expected >= 3 content_block_start events (server_tool_use, web_search_tool_result, text), got:\n%s", respBody)
+	}
+	if strings.Count(respBody, "event: content_block_stop") < 3 {
+		t.Errorf("expected >= 3 content_block_stop events, got:\n%s", respBody)
+	}
+	// Progress hints must be silently absorbed — they have no Anthropic equivalent.
+	if strings.Contains(respBody, "web_search_call.in_progress") {
+		t.Errorf("progress hint leaked into Anthropic stream: %s", respBody)
+	}
+	if !strings.Contains(respBody, "message_stop") {
+		t.Errorf("missing terminal message_stop: %s", respBody)
+	}
+}
+
 // TestIntegration_Anthropic_To_OpenAIChat_Streaming tests the full streaming flow:
 // Anthropic stream request → OpenAI Chat SSE upstream → Anthropic SSE response.
 func TestIntegration_Anthropic_To_OpenAIChat_Streaming(t *testing.T) {
