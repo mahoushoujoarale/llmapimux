@@ -1102,12 +1102,74 @@ func TestEncodeAnthropicResponse_WebSearchBlocks_EmptySuccessIncludesContentArra
 	if !ok {
 		t.Fatal("content[0].content missing, want empty array")
 	}
+	// Strict byte-level check: nil slice marshals to "null" by default in Go,
+	// but Anthropic clients expect an array. Distinguish the two explicitly.
+	if string(contentRaw) != "[]" {
+		t.Fatalf("content[0].content = %s, want %q", string(contentRaw), "[]")
+	}
 	var hits []map[string]json.RawMessage
 	if err := json.Unmarshal(contentRaw, &hits); err != nil {
 		t.Fatalf("unmarshal content[0].content: %v", err)
 	}
 	if len(hits) != 0 {
 		t.Fatalf("content[0].content len = %d, want 0", len(hits))
+	}
+}
+
+func TestEncodeAnthropicResponse_WebSearchBlocks_ErrorBlockNormalized(t *testing.T) {
+	// Anthropic's wire format for a web_search_tool_result error is
+	// content = {"type":"web_search_tool_result_error", "error_code":"..."}
+	// with NO top-level is_error / error_code on the block itself.
+	resp := &Response{
+		ID:         "msg_ws_err",
+		Model:      "claude-sonnet-4-20250514",
+		StopReason: StopReasonEndTurn,
+		Content: []ContentPart{
+			{
+				Type: ContentTypeWebSearchToolResult,
+				WebSearchToolResult: &WebSearchToolResultContent{
+					ToolUseID: "ws_1",
+					IsError:   true,
+					ErrorCode: "max_uses_exceeded",
+				},
+			},
+		},
+	}
+
+	body, err := EncodeAnthropicResponse(resp)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	var content []map[string]json.RawMessage
+	if err := json.Unmarshal(raw["content"], &content); err != nil {
+		t.Fatalf("unmarshal content: %v", err)
+	}
+	if len(content) != 1 {
+		t.Fatalf("content len = %d, want 1", len(content))
+	}
+	block := content[0]
+
+	if _, has := block["is_error"]; has {
+		t.Errorf("web_search_tool_result block has top-level is_error, should nest error in content: %s", raw["content"])
+	}
+	if _, has := block["error_code"]; has {
+		t.Errorf("web_search_tool_result block has top-level error_code, should nest error in content: %s", raw["content"])
+	}
+
+	var errContent map[string]string
+	if err := json.Unmarshal(block["content"], &errContent); err != nil {
+		t.Fatalf("unmarshal nested error content: %v (raw=%s)", err, block["content"])
+	}
+	if errContent["type"] != "web_search_tool_result_error" {
+		t.Errorf("content.type = %q, want %q", errContent["type"], "web_search_tool_result_error")
+	}
+	if errContent["error_code"] != "max_uses_exceeded" {
+		t.Errorf("content.error_code = %q, want max_uses_exceeded", errContent["error_code"])
 	}
 }
 
@@ -1601,6 +1663,9 @@ func TestEncodeAnthropicStreamEvent_ContentBlockStart_WebSearchToolResult_EmptyS
 	contentRaw, ok := block["content"]
 	if !ok {
 		t.Fatal("content_block.content missing, want empty array")
+	}
+	if string(contentRaw) != "[]" {
+		t.Fatalf("content_block.content = %s, want %q", string(contentRaw), "[]")
 	}
 	var hits []map[string]json.RawMessage
 	if err := json.Unmarshal(contentRaw, &hits); err != nil {

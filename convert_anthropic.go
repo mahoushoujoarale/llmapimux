@@ -720,13 +720,15 @@ func encodeAnthropicContentPart(p ContentPart) (anthropic.ContentBlock, error) {
 		return b, nil
 
 	case ContentTypeWebSearchToolResult:
+		// Anthropic wire format for web_search_tool_result differs from tool_result:
+		//   - On success, content is a JSON array of {type:"web_search_result", url, title}.
+		//   - On failure, content is an object {type:"web_search_tool_result_error", error_code}.
+		// There is no top-level is_error / error_code on this block type.
 		b := anthropic.ContentBlock{Type: "web_search_tool_result"}
 		if p.WebSearchToolResult != nil {
 			b.ToolUseID = p.WebSearchToolResult.ToolUseID
-			b.IsError = p.WebSearchToolResult.IsError
-			b.ErrorCode = p.WebSearchToolResult.ErrorCode
 			if p.WebSearchToolResult.IsError {
-				payload := map[string]string{}
+				payload := map[string]string{"type": "web_search_tool_result_error"}
 				if p.WebSearchToolResult.ErrorCode != "" {
 					payload["error_code"] = p.WebSearchToolResult.ErrorCode
 				}
@@ -736,7 +738,11 @@ func encodeAnthropicContentPart(p ContentPart) (anthropic.ContentBlock, error) {
 				}
 				b.ContentRaw = raw
 			} else {
-				raw, err := json.Marshal(p.WebSearchToolResult.Content)
+				hits := p.WebSearchToolResult.Content
+				if hits == nil {
+					hits = []WebSearchResult{}
+				}
+				raw, err := json.Marshal(hits)
 				if err != nil {
 					return anthropic.ContentBlock{}, fmt.Errorf("web_search_tool_result content marshal: %w", err)
 				}
