@@ -118,6 +118,17 @@ func selectToolsByName(tools []Tool, names []string) []Tool {
 	return selected
 }
 
+func isNonEmptyJSONArray(raw json.RawMessage) (bool, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false, nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return false, err
+	}
+	return len(items) > 0, nil
+}
+
 func decodeOpenAIResponsesToolExtraFields(toolType string, extra map[string]json.RawMessage) (map[string]json.RawMessage, error) {
 	dst := cloneRawMessageMap(extra)
 	if len(dst) == 0 || isFunctionToolType(toolType) {
@@ -132,7 +143,23 @@ func decodeOpenAIResponsesToolExtraFields(toolType string, extra map[string]json
 				return nil, fmt.Errorf("decode web_search filters: %w", err)
 			}
 			if allowedDomains, ok := filters["allowed_domains"]; ok && len(allowedDomains) > 0 && string(allowedDomains) != "null" {
-				dst["allowed_domains"] = cloneRawMessage(allowedDomains)
+				nonEmpty, err := isNonEmptyJSONArray(allowedDomains)
+				if err != nil {
+					return nil, fmt.Errorf("decode web_search filters.allowed_domains: %w", err)
+				}
+				if nonEmpty {
+					dst["allowed_domains"] = cloneRawMessage(allowedDomains)
+				}
+				delete(filters, "allowed_domains")
+			}
+			if len(filters) > 0 {
+				sanitizedFilters, err := json.Marshal(filters)
+				if err != nil {
+					return nil, fmt.Errorf("decode sanitized web_search filters: %w", err)
+				}
+				dst["filters"] = sanitizedFilters
+			} else {
+				delete(dst, "filters")
 			}
 		}
 	}
@@ -161,7 +188,13 @@ func encodeOpenAIResponsesToolExtraFields(toolType string, extra map[string]json
 			filters = make(map[string]json.RawMessage)
 		}
 		if allowedDomains, ok := dst["allowed_domains"]; ok && len(allowedDomains) > 0 && string(allowedDomains) != "null" {
-			filters["allowed_domains"] = cloneRawMessage(allowedDomains)
+			nonEmpty, err := isNonEmptyJSONArray(allowedDomains)
+			if err != nil {
+				return nil, fmt.Errorf("encode web_search allowed_domains: %w", err)
+			}
+			if nonEmpty {
+				filters["allowed_domains"] = cloneRawMessage(allowedDomains)
+			}
 		}
 		delete(dst, "allowed_domains")
 		delete(dst, "blocked_domains")

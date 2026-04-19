@@ -374,6 +374,34 @@ func TestDecodeOpenAIResponsesRequest_WebSearchToolFilters(t *testing.T) {
 	}
 }
 
+func TestDecodeOpenAIResponsesRequest_WebSearchToolFilters_DropsEmptyAllowedDomains(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-4o",
+		"input": "Hello",
+		"tools": [{
+			"type": "web_search",
+			"filters": {"allowed_domains": []}
+		}]
+	}`)
+
+	req, err := DecodeOpenAIResponsesRequest(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(req.Tools) != 1 {
+		t.Fatalf("Tools len = %d, want 1", len(req.Tools))
+	}
+	if req.Tools[0].ExtraFields != nil {
+		if _, ok := req.Tools[0].ExtraFields["allowed_domains"]; ok {
+			t.Fatal("Tools[0].ExtraFields[allowed_domains] present, want dropped for empty array")
+		}
+		if _, ok := req.Tools[0].ExtraFields["filters"]; ok {
+			t.Fatal("Tools[0].ExtraFields[filters] present, want dropped for empty array")
+		}
+	}
+}
+
 func TestDecodeOpenAIResponsesRequest_AllowedTools(t *testing.T) {
 	body := []byte(`{
 		"model": "gpt-4o",
@@ -908,6 +936,46 @@ func TestEncodeOpenAIResponsesRequest_WebSearchToolFilters(t *testing.T) {
 	}
 	if searchContextSize != "high" {
 		t.Errorf("tools[0].search_context_size = %q, want high", searchContextSize)
+	}
+}
+
+func TestEncodeOpenAIResponsesRequest_WebSearchToolFilters_DropsEmptyAllowedDomains(t *testing.T) {
+	req := &Request{
+		Model: "gpt-4o",
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}}}},
+		},
+		Tools: []Tool{
+			{
+				Type: "web_search",
+				Name: "web_search",
+				ExtraFields: map[string]json.RawMessage{
+					"allowed_domains": json.RawMessage(`[]`),
+				},
+			},
+		},
+	}
+
+	data, err := EncodeOpenAIResponsesRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+
+	var tools []map[string]json.RawMessage
+	if err := json.Unmarshal(raw["tools"], &tools); err != nil {
+		t.Fatalf("unmarshal tools: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(tools))
+	}
+
+	if _, ok := tools[0]["filters"]; ok {
+		t.Fatal("tools[0].filters present, want dropped when allowed_domains is empty")
 	}
 }
 

@@ -313,6 +313,70 @@ func TestIntegration_AnthropicToOpenAIResponses_PreservesBuiltInWebSearch(t *tes
 	}
 }
 
+func TestIntegration_AnthropicToOpenAIResponses_DropsEmptyAllowedDomains(t *testing.T) {
+	var gotBody map[string]json.RawMessage
+	openaiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp_1",
+			"model":"gpt-5",
+			"status":"completed",
+			"output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],
+			"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}
+		}`))
+	}))
+	defer openaiServer.Close()
+
+	mux := NewMux(&staticRouter{result: RouteResult{
+		Protocol: ProtocolOpenAIResponses,
+		BaseURL:  openaiServer.URL,
+		APIKey:   "sk-openai",
+		Model:    "gpt-5",
+	}})
+
+	reqBody := `{
+		"model":"claude-sonnet-4-20250514",
+		"max_tokens":256,
+		"messages":[{"role":"user","content":[{"type":"text","text":"Search for qwer1234"}]}],
+		"tools":[
+			{
+				"name":"web_search",
+				"type":"web_search_20250305",
+				"allowed_domains":[]
+			}
+		],
+		"tool_choice":{"type":"tool","name":"web_search"}
+	}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	mux.AnthropicHandler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	toolsRaw, ok := gotBody["tools"]
+	if !ok {
+		t.Fatal("tools missing from outbound OpenAI Responses request")
+	}
+	var tools []map[string]json.RawMessage
+	if err := json.Unmarshal(toolsRaw, &tools); err != nil {
+		t.Fatalf("unmarshal tools: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(tools))
+	}
+
+	if _, ok := tools[0]["filters"]; ok {
+		t.Fatal("tools[0].filters present, want dropped when allowed_domains is empty")
+	}
+}
+
 func TestIntegration_AnthropicToOpenAIResponses_WebSearchResponseRoundTrip(t *testing.T) {
 	var gotBody map[string]json.RawMessage
 	openaiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
