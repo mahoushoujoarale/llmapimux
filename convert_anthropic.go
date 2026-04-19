@@ -280,6 +280,16 @@ func convertAnthropicContentBlock(b anthropic.ContentBlock) (ContentPart, error)
 			},
 		}, nil
 
+	case "server_tool_use":
+		return ContentPart{
+			Type: ContentTypeServerToolUse,
+			ServerToolUse: &ServerToolUseContent{
+				ID:        b.ID,
+				Name:      b.Name,
+				Arguments: b.Input,
+			},
+		}, nil
+
 	case "tool_result":
 		var content []ContentPart
 		if len(b.ContentRaw) > 0 {
@@ -296,6 +306,16 @@ func convertAnthropicContentBlock(b anthropic.ContentBlock) (ContentPart, error)
 				Content:   content,
 				IsError:   b.IsError,
 			},
+		}, nil
+
+	case "web_search_tool_result":
+		result, err := decodeAnthropicWebSearchToolResult(b)
+		if err != nil {
+			return ContentPart{}, fmt.Errorf("web_search_tool_result content: %w", err)
+		}
+		return ContentPart{
+			Type:                ContentTypeWebSearchToolResult,
+			WebSearchToolResult: result,
 		}, nil
 
 	case "thinking":
@@ -320,6 +340,36 @@ func convertAnthropicContentBlock(b anthropic.ContentBlock) (ContentPart, error)
 			Type: ContentType(b.Type),
 		}, nil
 	}
+}
+
+func decodeAnthropicWebSearchToolResult(b anthropic.ContentBlock) (*WebSearchToolResultContent, error) {
+	result := &WebSearchToolResultContent{
+		ToolUseID: b.ToolUseID,
+		IsError:   b.IsError,
+		ErrorCode: b.ErrorCode,
+	}
+	if len(b.ContentRaw) == 0 || string(b.ContentRaw) == "null" {
+		return result, nil
+	}
+
+	var hits []WebSearchResult
+	if err := json.Unmarshal(b.ContentRaw, &hits); err == nil {
+		result.Content = hits
+		return result, nil
+	}
+
+	var errPayload struct {
+		ErrorCode string `json:"error_code"`
+	}
+	if err := json.Unmarshal(b.ContentRaw, &errPayload); err == nil {
+		if errPayload.ErrorCode != "" {
+			result.IsError = true
+			result.ErrorCode = errPayload.ErrorCode
+		}
+		return result, nil
+	}
+
+	return nil, fmt.Errorf("unsupported web_search_tool_result payload: %s", string(b.ContentRaw))
 }
 
 // convertAnthropicImageSource converts an anthropic.Source to an ImageContent.
@@ -469,12 +519,16 @@ func EncodeAnthropicRequest(req *Request) ([]byte, error) {
 	// Tools
 	if len(req.Tools) > 0 {
 		tools := make([]anthropic.Tool, 0, len(req.Tools))
-		for _, t := range req.Tools {
+		for i, t := range req.Tools {
+			extraFields, err := encodeAnthropicToolExtraFields(t.Type, t.ExtraFields)
+			if err != nil {
+				return nil, fmt.Errorf("encode anthropic request tools[%d]: %w", i, err)
+			}
 			tool := anthropic.Tool{
 				Name:        t.Name,
 				Description: t.Description,
 				Type:        anthropicToolTypeFromIR(t.Type),
-				ExtraFields: cloneRawMessageMap(t.ExtraFields),
+				ExtraFields: extraFields,
 			}
 			if isFunctionToolType(t.Type) {
 				tool.InputSchema = t.Parameters
@@ -637,6 +691,15 @@ func encodeAnthropicContentPart(p ContentPart) (anthropic.ContentBlock, error) {
 		}
 		return b, nil
 
+	case ContentTypeServerToolUse:
+		b := anthropic.ContentBlock{Type: "server_tool_use"}
+		if p.ServerToolUse != nil {
+			b.ID = p.ServerToolUse.ID
+			b.Name = p.ServerToolUse.Name
+			b.Input = p.ServerToolUse.Arguments
+		}
+		return b, nil
+
 	case ContentTypeToolResult:
 		b := anthropic.ContentBlock{Type: "tool_result"}
 		if p.ToolResult != nil {
@@ -650,6 +713,28 @@ func encodeAnthropicContentPart(p ContentPart) (anthropic.ContentBlock, error) {
 				raw, err := json.Marshal(nested)
 				if err != nil {
 					return anthropic.ContentBlock{}, fmt.Errorf("tool_result content marshal: %w", err)
+				}
+				b.ContentRaw = raw
+			}
+		}
+		return b, nil
+
+	case ContentTypeWebSearchToolResult:
+		b := anthropic.ContentBlock{Type: "web_search_tool_result"}
+		if p.WebSearchToolResult != nil {
+			b.ToolUseID = p.WebSearchToolResult.ToolUseID
+			b.IsError = p.WebSearchToolResult.IsError
+			b.ErrorCode = p.WebSearchToolResult.ErrorCode
+			if p.WebSearchToolResult.IsError && p.WebSearchToolResult.ErrorCode != "" {
+				raw, err := json.Marshal(map[string]string{"error_code": p.WebSearchToolResult.ErrorCode})
+				if err != nil {
+					return anthropic.ContentBlock{}, fmt.Errorf("web_search_tool_result error marshal: %w", err)
+				}
+				b.ContentRaw = raw
+			} else if len(p.WebSearchToolResult.Content) > 0 {
+				raw, err := json.Marshal(p.WebSearchToolResult.Content)
+				if err != nil {
+					return anthropic.ContentBlock{}, fmt.Errorf("web_search_tool_result content marshal: %w", err)
 				}
 				b.ContentRaw = raw
 			}
@@ -974,6 +1059,12 @@ func EncodeAnthropicStreamEvent(event *StreamEvent) (string, []byte, error) {
 			delta.Type = "input_json_delta"
 			if event.Delta.ToolUse != nil {
 				pj := string(event.Delta.ToolUse.Arguments)
+				delta.PartialJSON = &pj
+			}
+		case ContentTypeServerToolUse:
+			delta.Type = "input_json_delta"
+			if event.Delta.ServerToolUse != nil {
+				pj := string(event.Delta.ServerToolUse.Arguments)
 				delta.PartialJSON = &pj
 			}
 		case ContentTypeRefusal:

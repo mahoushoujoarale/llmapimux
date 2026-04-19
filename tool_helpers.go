@@ -1,6 +1,18 @@
 package llmapimux
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
+
+func cloneRawMessage(src json.RawMessage) json.RawMessage {
+	if src == nil {
+		return nil
+	}
+	dst := make([]byte, len(src))
+	copy(dst, src)
+	return json.RawMessage(dst)
+}
 
 func cloneRawMessageMap(src map[string]json.RawMessage) map[string]json.RawMessage {
 	if len(src) == 0 {
@@ -8,13 +20,7 @@ func cloneRawMessageMap(src map[string]json.RawMessage) map[string]json.RawMessa
 	}
 	dst := make(map[string]json.RawMessage, len(src))
 	for k, v := range src {
-		if v == nil {
-			dst[k] = nil
-			continue
-		}
-		buf := make([]byte, len(v))
-		copy(buf, v)
-		dst[k] = json.RawMessage(buf)
+		dst[k] = cloneRawMessage(v)
 	}
 	return dst
 }
@@ -110,4 +116,105 @@ func selectToolsByName(tools []Tool, names []string) []Tool {
 		}
 	}
 	return selected
+}
+
+func decodeOpenAIResponsesToolExtraFields(toolType string, extra map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	dst := cloneRawMessageMap(extra)
+	if len(dst) == 0 || isFunctionToolType(toolType) {
+		return dst, nil
+	}
+
+	switch normalizeOpenAIResponsesToolType(toolType) {
+	case "web_search":
+		if filtersRaw, ok := dst["filters"]; ok && len(filtersRaw) > 0 && string(filtersRaw) != "null" {
+			var filters map[string]json.RawMessage
+			if err := json.Unmarshal(filtersRaw, &filters); err != nil {
+				return nil, fmt.Errorf("decode web_search filters: %w", err)
+			}
+			if allowedDomains, ok := filters["allowed_domains"]; ok && len(allowedDomains) > 0 && string(allowedDomains) != "null" {
+				dst["allowed_domains"] = cloneRawMessage(allowedDomains)
+			}
+		}
+	}
+
+	if len(dst) == 0 {
+		return nil, nil
+	}
+	return dst, nil
+}
+
+func encodeOpenAIResponsesToolExtraFields(toolType string, extra map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	dst := cloneRawMessageMap(extra)
+	if len(dst) == 0 || isFunctionToolType(toolType) {
+		return dst, nil
+	}
+
+	switch openAIResponsesToolTypeFromIR(toolType) {
+	case "web_search":
+		var filters map[string]json.RawMessage
+		if filtersRaw, ok := dst["filters"]; ok && len(filtersRaw) > 0 && string(filtersRaw) != "null" {
+			if err := json.Unmarshal(filtersRaw, &filters); err != nil {
+				return nil, fmt.Errorf("encode web_search filters: %w", err)
+			}
+		}
+		if filters == nil {
+			filters = make(map[string]json.RawMessage)
+		}
+		if allowedDomains, ok := dst["allowed_domains"]; ok && len(allowedDomains) > 0 && string(allowedDomains) != "null" {
+			filters["allowed_domains"] = cloneRawMessage(allowedDomains)
+		}
+		delete(dst, "allowed_domains")
+		delete(dst, "blocked_domains")
+		delete(dst, "max_uses")
+
+		if len(filters) > 0 {
+			filtersRaw, err := json.Marshal(filters)
+			if err != nil {
+				return nil, fmt.Errorf("encode web_search filters object: %w", err)
+			}
+			dst["filters"] = filtersRaw
+		} else {
+			delete(dst, "filters")
+		}
+	}
+
+	if len(dst) == 0 {
+		return nil, nil
+	}
+	return dst, nil
+}
+
+func encodeAnthropicToolExtraFields(toolType string, extra map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	dst := cloneRawMessageMap(extra)
+	if len(dst) == 0 || isFunctionToolType(toolType) {
+		return dst, nil
+	}
+
+	switch anthropicToolTypeFromIR(toolType) {
+	case "web_search_20250305":
+		result := make(map[string]json.RawMessage, 3)
+		if allowedDomains, ok := dst["allowed_domains"]; ok && len(allowedDomains) > 0 && string(allowedDomains) != "null" {
+			result["allowed_domains"] = cloneRawMessage(allowedDomains)
+		} else if filtersRaw, ok := dst["filters"]; ok && len(filtersRaw) > 0 && string(filtersRaw) != "null" {
+			var filters map[string]json.RawMessage
+			if err := json.Unmarshal(filtersRaw, &filters); err != nil {
+				return nil, fmt.Errorf("encode anthropic web_search filters: %w", err)
+			}
+			if allowedDomains, ok := filters["allowed_domains"]; ok && len(allowedDomains) > 0 && string(allowedDomains) != "null" {
+				result["allowed_domains"] = cloneRawMessage(allowedDomains)
+			}
+		}
+		if blockedDomains, ok := dst["blocked_domains"]; ok && len(blockedDomains) > 0 && string(blockedDomains) != "null" {
+			result["blocked_domains"] = cloneRawMessage(blockedDomains)
+		}
+		if maxUses, ok := dst["max_uses"]; ok && len(maxUses) > 0 && string(maxUses) != "null" {
+			result["max_uses"] = cloneRawMessage(maxUses)
+		}
+		if len(result) == 0 {
+			return nil, nil
+		}
+		return result, nil
+	}
+
+	return dst, nil
 }

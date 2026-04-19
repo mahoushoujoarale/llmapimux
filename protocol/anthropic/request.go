@@ -45,6 +45,7 @@ type ContentBlock struct {
 	ToolUseID  string          `json:"tool_use_id,omitempty"`
 	ContentRaw json.RawMessage `json:"content,omitempty"`
 	IsError    bool            `json:"is_error,omitempty"`
+	ErrorCode  string          `json:"error_code,omitempty"`
 
 	// thinking
 	Thinking  string `json:"thinking,omitempty"`

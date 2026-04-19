@@ -22,6 +22,8 @@ type OutputItem struct {
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
+	Status    string          `json:"status,omitempty"`
+	Action    json.RawMessage `json:"action,omitempty"`
 }
 
 // OutputContent represents a content part in a response output message.
@@ -34,10 +36,10 @@ type OutputContent struct {
 
 // Usage represents usage information.
 type Usage struct {
-	InputTokens         int           `json:"input_tokens"`
-	OutputTokens        int           `json:"output_tokens"`
-	TotalTokens         int           `json:"total_tokens"`
-	InputTokensDetails  *InputDetails `json:"input_tokens_details,omitempty"`
+	InputTokens         int            `json:"input_tokens"`
+	OutputTokens        int            `json:"output_tokens"`
+	TotalTokens         int            `json:"total_tokens"`
+	InputTokensDetails  *InputDetails  `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails *OutputDetails `json:"output_tokens_details,omitempty"`
 }
 

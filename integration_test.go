@@ -272,28 +272,27 @@ func TestIntegration_AnthropicToOpenAIResponses_PreservesBuiltInWebSearch(t *tes
 		t.Errorf("tools[0].type = %q, want web_search", toolType)
 	}
 
+	if _, ok := tools[0]["allowed_domains"]; ok {
+		t.Fatal("tools[0].allowed_domains present, want nested under filters")
+	}
+	if _, ok := tools[0]["blocked_domains"]; ok {
+		t.Fatal("tools[0].blocked_domains present, want dropped")
+	}
+	if _, ok := tools[0]["max_uses"]; ok {
+		t.Fatal("tools[0].max_uses present, want dropped")
+	}
+
+	var filters map[string]json.RawMessage
+	if err := json.Unmarshal(tools[0]["filters"], &filters); err != nil {
+		t.Fatalf("unmarshal tools[0].filters: %v", err)
+	}
+
 	var allowedDomains []string
-	if err := json.Unmarshal(tools[0]["allowed_domains"], &allowedDomains); err != nil {
-		t.Fatalf("unmarshal tools[0].allowed_domains: %v", err)
+	if err := json.Unmarshal(filters["allowed_domains"], &allowedDomains); err != nil {
+		t.Fatalf("unmarshal tools[0].filters.allowed_domains: %v", err)
 	}
 	if len(allowedDomains) != 1 || allowedDomains[0] != "openai.com" {
-		t.Errorf("tools[0].allowed_domains = %v, want [openai.com]", allowedDomains)
-	}
-
-	var blockedDomains []string
-	if err := json.Unmarshal(tools[0]["blocked_domains"], &blockedDomains); err != nil {
-		t.Fatalf("unmarshal tools[0].blocked_domains: %v", err)
-	}
-	if len(blockedDomains) != 1 || blockedDomains[0] != "example.com" {
-		t.Errorf("tools[0].blocked_domains = %v, want [example.com]", blockedDomains)
-	}
-
-	var maxUses int
-	if err := json.Unmarshal(tools[0]["max_uses"], &maxUses); err != nil {
-		t.Fatalf("unmarshal tools[0].max_uses: %v", err)
-	}
-	if maxUses != 3 {
-		t.Errorf("tools[0].max_uses = %d, want 3", maxUses)
+		t.Errorf("tools[0].filters.allowed_domains = %v, want [openai.com]", allowedDomains)
 	}
 
 	tcRaw, ok := gotBody["tool_choice"]
@@ -311,6 +310,102 @@ func TestIntegration_AnthropicToOpenAIResponses_PreservesBuiltInWebSearch(t *tes
 	}
 	if tcType != "web_search" {
 		t.Errorf("tool_choice.type = %q, want web_search", tcType)
+	}
+}
+
+func TestIntegration_AnthropicToOpenAIResponses_WebSearchResponseRoundTrip(t *testing.T) {
+	var gotBody map[string]json.RawMessage
+	openaiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp_ws",
+			"model":"gpt-5",
+			"status":"completed",
+			"output":[
+				{
+					"type":"web_search_call",
+					"id":"ws_1",
+					"status":"completed",
+					"action":{
+						"type":"search",
+						"query":"qwer1234",
+						"sources":[{"type":"url","url":"https://openai.com"}]
+					}
+				},
+				{
+					"type":"message",
+					"id":"msg_1",
+					"role":"assistant",
+					"content":[{"type":"output_text","text":"Found a source."}]
+				}
+			],
+			"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}
+		}`))
+	}))
+	defer openaiServer.Close()
+
+	mux := NewMux(&staticRouter{result: RouteResult{
+		Protocol: ProtocolOpenAIResponses,
+		BaseURL:  openaiServer.URL,
+		APIKey:   "sk-openai",
+		Model:    "gpt-5",
+	}})
+
+	reqBody := `{
+		"model":"claude-sonnet-4-20250514",
+		"max_tokens":256,
+		"messages":[{"role":"user","content":[{"type":"text","text":"Search for qwer1234"}]}],
+		"tools":[{"name":"web_search","type":"web_search_20250305","allowed_domains":["openai.com"]}],
+		"tool_choice":{"type":"tool","name":"web_search"}
+	}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	mux.AnthropicHandler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode downstream body: %v", err)
+	}
+
+	var content []map[string]json.RawMessage
+	if err := json.Unmarshal(resp["content"], &content); err != nil {
+		t.Fatalf("unmarshal content: %v", err)
+	}
+	if len(content) != 3 {
+		t.Fatalf("content len = %d, want 3", len(content))
+	}
+
+	var firstType string
+	if err := json.Unmarshal(content[0]["type"], &firstType); err != nil {
+		t.Fatalf("unmarshal content[0].type: %v", err)
+	}
+	if firstType != "server_tool_use" {
+		t.Errorf("content[0].type = %q, want server_tool_use", firstType)
+	}
+
+	var secondType string
+	if err := json.Unmarshal(content[1]["type"], &secondType); err != nil {
+		t.Fatalf("unmarshal content[1].type: %v", err)
+	}
+	if secondType != "web_search_tool_result" {
+		t.Errorf("content[1].type = %q, want web_search_tool_result", secondType)
+	}
+
+	var thirdType string
+	if err := json.Unmarshal(content[2]["type"], &thirdType); err != nil {
+		t.Fatalf("unmarshal content[2].type: %v", err)
+	}
+	if thirdType != "text" {
+		t.Errorf("content[2].type = %q, want text", thirdType)
 	}
 }
 

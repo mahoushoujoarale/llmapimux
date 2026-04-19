@@ -861,6 +861,49 @@ func TestDecodeAnthropicResponse_ToolUse(t *testing.T) {
 	}
 }
 
+func TestDecodeAnthropicResponse_WebSearchBlocks(t *testing.T) {
+	body := []byte(`{
+		"id": "msg_ws1",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-sonnet-4-20250514",
+		"content": [
+			{"type": "server_tool_use", "id": "ws_1", "name": "web_search", "input": {"query": "qwer1234"}},
+			{"type": "web_search_tool_result", "tool_use_id": "ws_1", "content": [{"title":"OpenAI","url":"https://openai.com"}]},
+			{"type": "text", "text": "Found a source."}
+		],
+		"stop_reason": "end_turn",
+		"usage": {"input_tokens": 20, "output_tokens": 15, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+	}`)
+
+	resp, err := DecodeAnthropicResponse(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(resp.Content) != 3 {
+		t.Fatalf("Content len = %d, want 3", len(resp.Content))
+	}
+	if resp.Content[0].Type != ContentTypeServerToolUse || resp.Content[0].ServerToolUse == nil {
+		t.Fatalf("Content[0] = %+v, want server_tool_use", resp.Content[0])
+	}
+	if resp.Content[0].ServerToolUse.ID != "ws_1" {
+		t.Errorf("ServerToolUse.ID = %q, want ws_1", resp.Content[0].ServerToolUse.ID)
+	}
+	if resp.Content[1].Type != ContentTypeWebSearchToolResult || resp.Content[1].WebSearchToolResult == nil {
+		t.Fatalf("Content[1] = %+v, want web_search_tool_result", resp.Content[1])
+	}
+	if resp.Content[1].WebSearchToolResult.ToolUseID != "ws_1" {
+		t.Errorf("WebSearchToolResult.ToolUseID = %q, want ws_1", resp.Content[1].WebSearchToolResult.ToolUseID)
+	}
+	if len(resp.Content[1].WebSearchToolResult.Content) != 1 {
+		t.Fatalf("WebSearchToolResult.Content len = %d, want 1", len(resp.Content[1].WebSearchToolResult.Content))
+	}
+	if resp.Content[1].WebSearchToolResult.Content[0].Title != "OpenAI" {
+		t.Errorf("WebSearchToolResult.Content[0].Title = %q, want OpenAI", resp.Content[1].WebSearchToolResult.Content[0].Title)
+	}
+}
+
 func TestDecodeAnthropicResponse_StopReasons(t *testing.T) {
 	cases := []struct {
 		raw  string
@@ -958,6 +1001,67 @@ func TestEncodeAnthropicResponse_Basic(t *testing.T) {
 	}
 	if block["text"] != "Hello!" {
 		t.Errorf("content[0].text = %v, want Hello!", block["text"])
+	}
+}
+
+func TestEncodeAnthropicResponse_WebSearchBlocks(t *testing.T) {
+	resp := &Response{
+		ID:         "msg_ws",
+		Model:      "claude-sonnet-4-20250514",
+		StopReason: StopReasonEndTurn,
+		Content: []ContentPart{
+			{
+				Type: ContentTypeServerToolUse,
+				ServerToolUse: &ServerToolUseContent{
+					ID:        "ws_1",
+					Name:      "web_search",
+					Arguments: json.RawMessage(`{"query":"qwer1234"}`),
+				},
+			},
+			{
+				Type: ContentTypeWebSearchToolResult,
+				WebSearchToolResult: &WebSearchToolResultContent{
+					ToolUseID: "ws_1",
+					Content: []WebSearchResult{
+						{Title: "OpenAI", URL: "https://openai.com"},
+					},
+				},
+			},
+		},
+	}
+
+	body, err := EncodeAnthropicResponse(resp)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	var content []map[string]json.RawMessage
+	if err := json.Unmarshal(raw["content"], &content); err != nil {
+		t.Fatalf("unmarshal content: %v", err)
+	}
+	if len(content) != 2 {
+		t.Fatalf("content len = %d, want 2", len(content))
+	}
+
+	var firstType string
+	if err := json.Unmarshal(content[0]["type"], &firstType); err != nil {
+		t.Fatalf("unmarshal content[0].type: %v", err)
+	}
+	if firstType != "server_tool_use" {
+		t.Errorf("content[0].type = %q, want server_tool_use", firstType)
+	}
+
+	var secondType string
+	if err := json.Unmarshal(content[1]["type"], &secondType); err != nil {
+		t.Fatalf("unmarshal content[1].type: %v", err)
+	}
+	if secondType != "web_search_tool_result" {
+		t.Errorf("content[1].type = %q, want web_search_tool_result", secondType)
 	}
 }
 
@@ -1388,6 +1492,40 @@ func TestEncodeAnthropicStreamEvent_ContentBlockStart_ToolUse(t *testing.T) {
 	}
 }
 
+func TestEncodeAnthropicStreamEvent_ContentBlockStart_WebSearchToolResult(t *testing.T) {
+	event := &StreamEvent{
+		Type:  StreamEventContentBlockStart,
+		Index: 2,
+		Delta: &ContentPart{
+			Type: ContentTypeWebSearchToolResult,
+			WebSearchToolResult: &WebSearchToolResultContent{
+				ToolUseID: "ws_1",
+				Content: []WebSearchResult{
+					{Title: "OpenAI", URL: "https://openai.com"},
+				},
+			},
+		},
+	}
+	eventType, data, err := EncodeAnthropicStreamEvent(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eventType != "content_block_start" {
+		t.Errorf("eventType = %q, want content_block_start", eventType)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	block := raw["content_block"].(map[string]interface{})
+	if block["type"] != "web_search_tool_result" {
+		t.Errorf("content_block.type = %v, want web_search_tool_result", block["type"])
+	}
+	if block["tool_use_id"] != "ws_1" {
+		t.Errorf("content_block.tool_use_id = %v, want ws_1", block["tool_use_id"])
+	}
+}
+
 func TestEncodeAnthropicStreamEvent_TextDelta(t *testing.T) {
 	event := &StreamEvent{
 		Type:  StreamEventDelta,
@@ -1448,6 +1586,37 @@ func TestEncodeAnthropicStreamEvent_InputJsonDelta(t *testing.T) {
 	}
 	if delta["partial_json"] != `{"path":` {
 		t.Errorf("delta.partial_json = %v", delta["partial_json"])
+	}
+}
+
+func TestEncodeAnthropicStreamEvent_ServerToolUseInputJsonDelta(t *testing.T) {
+	event := &StreamEvent{
+		Type:  StreamEventDelta,
+		Index: 1,
+		Delta: &ContentPart{
+			Type: ContentTypeServerToolUse,
+			ServerToolUse: &ServerToolUseContent{
+				Arguments: json.RawMessage(`{"query":"qwer1234"}`),
+			},
+		},
+	}
+	eventType, data, err := EncodeAnthropicStreamEvent(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eventType != "content_block_delta" {
+		t.Errorf("eventType = %q, want content_block_delta", eventType)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	delta := raw["delta"].(map[string]interface{})
+	if delta["type"] != "input_json_delta" {
+		t.Errorf("delta.type = %v, want input_json_delta", delta["type"])
+	}
+	if delta["partial_json"] != `{"query":"qwer1234"}` {
+		t.Errorf("delta.partial_json = %v, want {\"query\":\"qwer1234\"}", delta["partial_json"])
 	}
 }
 
@@ -2009,6 +2178,67 @@ func TestEncodeAnthropicRequest_AllowedToolNamesSingleTool(t *testing.T) {
 	}
 	if tcName != "my_tool" {
 		t.Errorf("tool_choice.name = %q, want my_tool", tcName)
+	}
+}
+
+func TestEncodeAnthropicRequest_WebSearchToolDropsResponsesOnlyFields(t *testing.T) {
+	req := &Request{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}}}},
+		},
+		Tools: []Tool{
+			{
+				Type: "web_search",
+				Name: "web_search",
+				ExtraFields: map[string]json.RawMessage{
+					"filters":             json.RawMessage(`{"allowed_domains":["openai.com"]}`),
+					"search_context_size": json.RawMessage(`"high"`),
+				},
+			},
+		},
+	}
+
+	body, err := EncodeAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	var tools []map[string]json.RawMessage
+	if err := json.Unmarshal(m["tools"], &tools); err != nil {
+		t.Fatalf("unmarshal tools: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(tools))
+	}
+
+	var toolType string
+	if err := json.Unmarshal(tools[0]["type"], &toolType); err != nil {
+		t.Fatalf("unmarshal tools[0].type: %v", err)
+	}
+	if toolType != "web_search_20250305" {
+		t.Errorf("tools[0].type = %q, want web_search_20250305", toolType)
+	}
+
+	var allowedDomains []string
+	if err := json.Unmarshal(tools[0]["allowed_domains"], &allowedDomains); err != nil {
+		t.Fatalf("unmarshal tools[0].allowed_domains: %v", err)
+	}
+	if len(allowedDomains) != 1 || allowedDomains[0] != "openai.com" {
+		t.Errorf("tools[0].allowed_domains = %v, want [openai.com]", allowedDomains)
+	}
+
+	if _, ok := tools[0]["filters"]; ok {
+		t.Fatal("tools[0].filters present, want dropped")
+	}
+	if _, ok := tools[0]["search_context_size"]; ok {
+		t.Fatal("tools[0].search_context_size present, want dropped")
 	}
 }
 

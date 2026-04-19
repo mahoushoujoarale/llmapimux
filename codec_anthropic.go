@@ -72,6 +72,11 @@ func (c *anthropicCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan 
 				ID:   delta.ToolUse.ID,
 				Name: delta.ToolUse.Name,
 			}
+		} else if deltaType == ContentTypeServerToolUse && delta != nil && delta.ServerToolUse != nil {
+			blockPart.ServerToolUse = &ServerToolUseContent{
+				ID:   delta.ServerToolUse.ID,
+				Name: delta.ServerToolUse.Name,
+			}
 		} else if deltaType == ContentTypeThinking {
 			blockPart.Thinking = &ThinkingContent{}
 		}
@@ -119,7 +124,7 @@ loop:
 
 		// For deltas: detect content-type changes and remap IR index → Anthropic index.
 		if event.Type == StreamEventDelta && event.Delta != nil &&
-			(event.Delta.Type == ContentTypeText || event.Delta.Type == ContentTypeToolUse || event.Delta.Type == ContentTypeThinking || event.Delta.Type == ContentTypeRefusal) {
+			(event.Delta.Type == ContentTypeText || event.Delta.Type == ContentTypeToolUse || event.Delta.Type == ContentTypeServerToolUse || event.Delta.Type == ContentTypeThinking || event.Delta.Type == ContentTypeRefusal) {
 
 			srcIdx := event.Index
 			anthIdx, mapped := sourceIndexMap[srcIdx]

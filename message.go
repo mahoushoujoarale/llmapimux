@@ -28,14 +28,16 @@ const (
 type ContentType string
 
 const (
-	ContentTypeText             ContentType = "text"
-	ContentTypeImage            ContentType = "image"
-	ContentTypeToolUse          ContentType = "tool_use"
-	ContentTypeToolResult       ContentType = "tool_result"
-	ContentTypeDocument         ContentType = "document"
-	ContentTypeThinking         ContentType = "thinking"
-	ContentTypeRedactedThinking ContentType = "redacted_thinking"
-	ContentTypeRefusal          ContentType = "refusal"
+	ContentTypeText                ContentType = "text"
+	ContentTypeImage               ContentType = "image"
+	ContentTypeToolUse             ContentType = "tool_use"
+	ContentTypeToolResult          ContentType = "tool_result"
+	ContentTypeServerToolUse       ContentType = "server_tool_use"
+	ContentTypeWebSearchToolResult ContentType = "web_search_tool_result"
+	ContentTypeDocument            ContentType = "document"
+	ContentTypeThinking            ContentType = "thinking"
+	ContentTypeRedactedThinking    ContentType = "redacted_thinking"
+	ContentTypeRefusal             ContentType = "refusal"
 )
 
 // CitationKind identifies the type of citation or annotation.
@@ -65,16 +67,18 @@ type RefusalContent struct {
 
 // ContentPart is a union type representing a single piece of content in a message.
 type ContentPart struct {
-	Type             ContentType              `json:"type"`
-	Text             *TextContent             `json:"text,omitempty"`
-	Image            *ImageContent            `json:"image,omitempty"`
-	ToolUse          *ToolUseContent          `json:"tool_use,omitempty"`
-	ToolResult       *ToolResultContent       `json:"tool_result,omitempty"`
-	Document         *DocumentContent         `json:"document,omitempty"`
-	Thinking         *ThinkingContent         `json:"thinking,omitempty"`
-	RedactedThinking *RedactedThinkingContent `json:"redacted_thinking,omitempty"`
-	Refusal          *RefusalContent          `json:"refusal,omitempty"`
-	Citations        []Citation               `json:"citations,omitempty"`
+	Type                ContentType                 `json:"type"`
+	Text                *TextContent                `json:"text,omitempty"`
+	Image               *ImageContent               `json:"image,omitempty"`
+	ToolUse             *ToolUseContent             `json:"tool_use,omitempty"`
+	ToolResult          *ToolResultContent          `json:"tool_result,omitempty"`
+	ServerToolUse       *ServerToolUseContent       `json:"server_tool_use,omitempty"`
+	WebSearchToolResult *WebSearchToolResultContent `json:"web_search_tool_result,omitempty"`
+	Document            *DocumentContent            `json:"document,omitempty"`
+	Thinking            *ThinkingContent            `json:"thinking,omitempty"`
+	RedactedThinking    *RedactedThinkingContent    `json:"redacted_thinking,omitempty"`
+	Refusal             *RefusalContent             `json:"refusal,omitempty"`
+	Citations           []Citation                  `json:"citations,omitempty"`
 }
 
 // TextContent holds plain text.
@@ -111,6 +115,27 @@ type ToolResultContent struct {
 	Name      string        `json:"name,omitempty"`
 	Content   []ContentPart `json:"content,omitempty"`
 	IsError   bool          `json:"is_error,omitempty"`
+}
+
+// ServerToolUseContent represents a built-in server tool call, such as Anthropic web_search.
+type ServerToolUseContent struct {
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+// WebSearchResult is a single search hit returned by a built-in web search tool.
+type WebSearchResult struct {
+	Title string `json:"title,omitempty"`
+	URL   string `json:"url,omitempty"`
+}
+
+// WebSearchToolResultContent represents the result block for a web search server tool call.
+type WebSearchToolResultContent struct {
+	ToolUseID string            `json:"tool_use_id"`
+	Content   []WebSearchResult `json:"content,omitempty"`
+	IsError   bool              `json:"is_error,omitempty"`
+	ErrorCode string            `json:"error_code,omitempty"`
 }
 
 // ThinkingContent holds extended thinking output from the model.

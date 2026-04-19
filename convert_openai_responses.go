@@ -107,14 +107,18 @@ func DecodeOpenAIResponsesRequest(body []byte) (*Request, error) {
 	// Tools
 	if len(raw.Tools) > 0 {
 		tools := make([]Tool, 0, len(raw.Tools))
-		for _, t := range raw.Tools {
+		for i, t := range raw.Tools {
+			extraFields, err := decodeOpenAIResponsesToolExtraFields(t.Type, t.ExtraFields)
+			if err != nil {
+				return nil, fmt.Errorf("decode openai responses request tools[%d]: %w", i, err)
+			}
 			tool := Tool{
 				Type:        normalizeOpenAIResponsesToolType(t.Type),
 				Name:        t.Name,
 				Description: t.Description,
 				Parameters:  t.Parameters,
 				Strict:      t.Strict,
-				ExtraFields: cloneRawMessageMap(t.ExtraFields),
+				ExtraFields: extraFields,
 			}
 			if !isFunctionToolType(tool.Type) && tool.Name == "" {
 				tool.Name = defaultToolNameForType(tool.Type)
@@ -500,10 +504,14 @@ func EncodeOpenAIResponsesRequest(req *Request) ([]byte, error) {
 	// Tools
 	if len(req.Tools) > 0 {
 		tools := make([]openairesponses.Tool, 0, len(req.Tools))
-		for _, t := range req.Tools {
+		for i, t := range req.Tools {
+			extraFields, err := encodeOpenAIResponsesToolExtraFields(t.Type, t.ExtraFields)
+			if err != nil {
+				return nil, fmt.Errorf("encode openai responses request tools[%d]: %w", i, err)
+			}
 			tool := openairesponses.Tool{
 				Type:        openAIResponsesToolTypeFromIR(t.Type),
-				ExtraFields: cloneRawMessageMap(t.ExtraFields),
+				ExtraFields: extraFields,
 			}
 			if isFunctionToolType(t.Type) {
 				tool.Name = t.Name
@@ -749,6 +757,133 @@ func encodeOaiRespToolChoice(req *Request) (json.RawMessage, error) {
 	}
 }
 
+const webSearchToolResultIndexOffset = 1000000
+
+func webSearchToolResultStreamIndex(base int) int {
+	return base + webSearchToolResultIndexOffset
+}
+
+type oaiRespWebSearchAction struct {
+	Type    string   `json:"type"`
+	Query   string   `json:"query,omitempty"`
+	Queries []string `json:"queries,omitempty"`
+	URL     string   `json:"url,omitempty"`
+	Pattern string   `json:"pattern,omitempty"`
+	Sources []struct {
+		Title string `json:"title,omitempty"`
+		URL   string `json:"url,omitempty"`
+	} `json:"sources,omitempty"`
+}
+
+func decodeOaiRespWebSearchAction(actionRaw json.RawMessage) (*oaiRespWebSearchAction, error) {
+	if len(actionRaw) == 0 || string(actionRaw) == "null" {
+		return nil, nil
+	}
+	var action oaiRespWebSearchAction
+	if err := json.Unmarshal(actionRaw, &action); err != nil {
+		return nil, fmt.Errorf("unmarshal web_search action: %w", err)
+	}
+	return &action, nil
+}
+
+func webSearchQueryArguments(action *oaiRespWebSearchAction) (json.RawMessage, error) {
+	if action == nil {
+		return nil, nil
+	}
+	query := action.Query
+	if query == "" && len(action.Queries) > 0 {
+		query = action.Queries[0]
+	}
+	if query == "" {
+		switch action.Type {
+		case "open_page":
+			query = action.URL
+		case "find_in_page":
+			query = action.Pattern
+		}
+	}
+	if query == "" {
+		return nil, nil
+	}
+	payload, err := json.Marshal(map[string]string{"query": query})
+	if err != nil {
+		return nil, fmt.Errorf("marshal web_search query: %w", err)
+	}
+	return payload, nil
+}
+
+func webSearchResultsFromAction(action *oaiRespWebSearchAction) []WebSearchResult {
+	if action == nil {
+		return nil
+	}
+	results := make([]WebSearchResult, 0, len(action.Sources))
+	for _, source := range action.Sources {
+		if source.URL == "" {
+			continue
+		}
+		title := source.Title
+		if title == "" {
+			title = source.URL
+		}
+		results = append(results, WebSearchResult{
+			Title: title,
+			URL:   source.URL,
+		})
+	}
+	if len(results) == 0 && action.URL != "" {
+		results = append(results, WebSearchResult{
+			Title: action.URL,
+			URL:   action.URL,
+		})
+	}
+	return results
+}
+
+func decodeOaiRespWebSearchCallParts(item openairesponses.OutputItem) ([]ContentPart, error) {
+	action, err := decodeOaiRespWebSearchAction(item.Action)
+	if err != nil {
+		return nil, err
+	}
+	args, err := webSearchQueryArguments(action)
+	if err != nil {
+		return nil, err
+	}
+	result := []ContentPart{
+		{
+			Type: ContentTypeServerToolUse,
+			ServerToolUse: &ServerToolUseContent{
+				ID:        item.ID,
+				Name:      "web_search",
+				Arguments: args,
+			},
+		},
+	}
+	webSearchResult := &WebSearchToolResultContent{
+		ToolUseID: item.ID,
+		Content:   webSearchResultsFromAction(action),
+	}
+	if item.Status == "failed" && len(webSearchResult.Content) == 0 {
+		webSearchResult.IsError = true
+		webSearchResult.ErrorCode = "failed"
+	}
+	result = append(result, ContentPart{
+		Type:                ContentTypeWebSearchToolResult,
+		WebSearchToolResult: webSearchResult,
+	})
+	return result, nil
+}
+
+func decodeOaiRespWebSearchResultPart(item openairesponses.OutputItem) (*ContentPart, error) {
+	parts, err := decodeOaiRespWebSearchCallParts(item)
+	if err != nil {
+		return nil, err
+	}
+	if len(parts) < 2 {
+		return nil, nil
+	}
+	return &parts[1], nil
+}
+
 // --- Response decode/encode ---
 
 // DecodeOpenAIResponsesResponse decodes an OpenAI Responses API JSON response body
@@ -806,6 +941,12 @@ func DecodeOpenAIResponsesResponse(body []byte) (*Response, error) {
 					Arguments: json.RawMessage(item.Arguments),
 				},
 			})
+		case "web_search_call":
+			parts, err := decodeOaiRespWebSearchCallParts(item)
+			if err != nil {
+				return nil, fmt.Errorf("decode openai responses response web_search_call: %w", err)
+			}
+			resp.Content = append(resp.Content, parts...)
 		}
 	}
 
@@ -960,6 +1101,8 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEve
 						Name: raw.Item.Name,
 					},
 				}
+			case "web_search_call":
+				return nil, nil
 			}
 		}
 		return event, nil
@@ -1002,6 +1145,20 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEve
 		var raw openairesponses.StreamEvent
 		if err := json.Unmarshal(data, &raw); err != nil {
 			return nil, fmt.Errorf("decode openai responses stream output_item.done: %w", err)
+		}
+		if raw.Item != nil && raw.Item.Type == "web_search_call" {
+			part, err := decodeOaiRespWebSearchResultPart(*raw.Item)
+			if err != nil {
+				return nil, fmt.Errorf("decode openai responses stream web_search_call done: %w", err)
+			}
+			if part == nil {
+				return nil, nil
+			}
+			return &StreamEvent{
+				Type:  StreamEventContentBlockStart,
+				Index: webSearchToolResultStreamIndex(derefIntPtr(raw.OutputIndex)),
+				Delta: part,
+			}, nil
 		}
 		return &StreamEvent{
 			Type:  StreamEventContentBlockStop,

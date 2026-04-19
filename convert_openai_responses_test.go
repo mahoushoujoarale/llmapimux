@@ -331,6 +331,49 @@ func TestDecodeOpenAIResponsesRequest_BuiltInToolChoiceObject(t *testing.T) {
 	}
 }
 
+func TestDecodeOpenAIResponsesRequest_WebSearchToolFilters(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-4o",
+		"input": "Hello",
+		"tools": [{
+			"type": "web_search",
+			"filters": {"allowed_domains": ["openai.com"]},
+			"search_context_size": "high"
+		}]
+	}`)
+
+	req, err := DecodeOpenAIResponsesRequest(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(req.Tools) != 1 {
+		t.Fatalf("Tools len = %d, want 1", len(req.Tools))
+	}
+	if req.Tools[0].Type != "web_search" {
+		t.Errorf("Tools[0].Type = %q, want web_search", req.Tools[0].Type)
+	}
+	if req.Tools[0].ExtraFields == nil {
+		t.Fatal("Tools[0].ExtraFields is nil")
+	}
+
+	var allowedDomains []string
+	if err := json.Unmarshal(req.Tools[0].ExtraFields["allowed_domains"], &allowedDomains); err != nil {
+		t.Fatalf("unmarshal Tools[0].ExtraFields[allowed_domains]: %v", err)
+	}
+	if len(allowedDomains) != 1 || allowedDomains[0] != "openai.com" {
+		t.Errorf("Tools[0].ExtraFields[allowed_domains] = %v, want [openai.com]", allowedDomains)
+	}
+
+	var searchContextSize string
+	if err := json.Unmarshal(req.Tools[0].ExtraFields["search_context_size"], &searchContextSize); err != nil {
+		t.Fatalf("unmarshal Tools[0].ExtraFields[search_context_size]: %v", err)
+	}
+	if searchContextSize != "high" {
+		t.Errorf("Tools[0].ExtraFields[search_context_size] = %q, want high", searchContextSize)
+	}
+}
+
 func TestDecodeOpenAIResponsesRequest_AllowedTools(t *testing.T) {
 	body := []byte(`{
 		"model": "gpt-4o",
@@ -798,6 +841,76 @@ func TestEncodeOpenAIResponsesRequest_BuiltInToolChoiceObject(t *testing.T) {
 	}
 }
 
+func TestEncodeOpenAIResponsesRequest_WebSearchToolFilters(t *testing.T) {
+	req := &Request{
+		Model: "gpt-4o",
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}}}},
+		},
+		Tools: []Tool{
+			{
+				Type: "web_search",
+				Name: "web_search",
+				ExtraFields: map[string]json.RawMessage{
+					"allowed_domains":     json.RawMessage(`["openai.com"]`),
+					"blocked_domains":     json.RawMessage(`["example.com"]`),
+					"max_uses":            json.RawMessage(`3`),
+					"search_context_size": json.RawMessage(`"high"`),
+				},
+			},
+		},
+	}
+
+	data, err := EncodeOpenAIResponsesRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+
+	var tools []map[string]json.RawMessage
+	if err := json.Unmarshal(raw["tools"], &tools); err != nil {
+		t.Fatalf("unmarshal tools: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(tools))
+	}
+
+	if _, ok := tools[0]["allowed_domains"]; ok {
+		t.Fatal("tools[0].allowed_domains present, want nested under filters")
+	}
+	if _, ok := tools[0]["blocked_domains"]; ok {
+		t.Fatal("tools[0].blocked_domains present, want dropped")
+	}
+	if _, ok := tools[0]["max_uses"]; ok {
+		t.Fatal("tools[0].max_uses present, want dropped")
+	}
+
+	var filters map[string]json.RawMessage
+	if err := json.Unmarshal(tools[0]["filters"], &filters); err != nil {
+		t.Fatalf("unmarshal tools[0].filters: %v", err)
+	}
+
+	var allowedDomains []string
+	if err := json.Unmarshal(filters["allowed_domains"], &allowedDomains); err != nil {
+		t.Fatalf("unmarshal tools[0].filters.allowed_domains: %v", err)
+	}
+	if len(allowedDomains) != 1 || allowedDomains[0] != "openai.com" {
+		t.Errorf("tools[0].filters.allowed_domains = %v, want [openai.com]", allowedDomains)
+	}
+
+	var searchContextSize string
+	if err := json.Unmarshal(tools[0]["search_context_size"], &searchContextSize); err != nil {
+		t.Fatalf("unmarshal tools[0].search_context_size: %v", err)
+	}
+	if searchContextSize != "high" {
+		t.Errorf("tools[0].search_context_size = %q, want high", searchContextSize)
+	}
+}
+
 func TestEncodeOpenAIResponsesRequest_AllowedTools(t *testing.T) {
 	req := &Request{
 		Model: "gpt-4o",
@@ -1023,6 +1136,79 @@ func TestDecodeOpenAIResponsesResponse_FunctionCall(t *testing.T) {
 	}
 	if resp.Content[1].ToolUse.Name != "read_file" {
 		t.Errorf("ToolUse.Name = %q, want %q", resp.Content[1].ToolUse.Name, "read_file")
+	}
+}
+
+func TestDecodeOpenAIResponsesResponse_WebSearchCall(t *testing.T) {
+	body := []byte(`{
+		"id": "resp_ws",
+		"model": "gpt-4o",
+		"status": "completed",
+		"output": [
+			{
+				"type": "web_search_call",
+				"id": "ws_1",
+				"status": "completed",
+				"action": {
+					"type": "search",
+					"query": "qwer1234",
+					"sources": [{"type":"url","url":"https://openai.com"}]
+				}
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "output_text", "text": "Found a source."}]
+			}
+		]
+	}`)
+
+	resp, err := DecodeOpenAIResponsesResponse(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(resp.Content) != 3 {
+		t.Fatalf("Content len = %d, want 3", len(resp.Content))
+	}
+	if resp.Content[0].Type != ContentTypeServerToolUse {
+		t.Fatalf("Content[0].Type = %q, want %q", resp.Content[0].Type, ContentTypeServerToolUse)
+	}
+	if resp.Content[0].ServerToolUse == nil {
+		t.Fatal("Content[0].ServerToolUse is nil")
+	}
+	if resp.Content[0].ServerToolUse.ID != "ws_1" {
+		t.Errorf("ServerToolUse.ID = %q, want ws_1", resp.Content[0].ServerToolUse.ID)
+	}
+
+	var args map[string]string
+	if err := json.Unmarshal(resp.Content[0].ServerToolUse.Arguments, &args); err != nil {
+		t.Fatalf("unmarshal ServerToolUse.Arguments: %v", err)
+	}
+	if args["query"] != "qwer1234" {
+		t.Errorf("ServerToolUse.Arguments[query] = %q, want qwer1234", args["query"])
+	}
+
+	if resp.Content[1].Type != ContentTypeWebSearchToolResult {
+		t.Fatalf("Content[1].Type = %q, want %q", resp.Content[1].Type, ContentTypeWebSearchToolResult)
+	}
+	if resp.Content[1].WebSearchToolResult == nil {
+		t.Fatal("Content[1].WebSearchToolResult is nil")
+	}
+	if resp.Content[1].WebSearchToolResult.ToolUseID != "ws_1" {
+		t.Errorf("WebSearchToolResult.ToolUseID = %q, want ws_1", resp.Content[1].WebSearchToolResult.ToolUseID)
+	}
+	if len(resp.Content[1].WebSearchToolResult.Content) != 1 {
+		t.Fatalf("WebSearchToolResult.Content len = %d, want 1", len(resp.Content[1].WebSearchToolResult.Content))
+	}
+	if resp.Content[1].WebSearchToolResult.Content[0].URL != "https://openai.com" {
+		t.Errorf("WebSearchToolResult.Content[0].URL = %q, want https://openai.com", resp.Content[1].WebSearchToolResult.Content[0].URL)
+	}
+	if resp.Content[2].Type != ContentTypeText || resp.Content[2].Text == nil || resp.Content[2].Text.Text != "Found a source." {
+		t.Errorf("Content[2] = %+v, want text 'Found a source.'", resp.Content[2])
+	}
+	if resp.StopReason != StopReasonEndTurn {
+		t.Errorf("StopReason = %q, want %q", resp.StopReason, StopReasonEndTurn)
 	}
 }
 
@@ -1396,6 +1582,52 @@ func TestDecodeOpenAIResponsesStreamEvent(t *testing.T) {
 			}
 			tt.check(t, event)
 		})
+	}
+}
+
+func TestDecodeOpenAIResponsesStreamEvent_WebSearchCallDone(t *testing.T) {
+	data := []byte(`{
+		"type":"response.output_item.done",
+		"output_index":0,
+		"item":{
+			"type":"web_search_call",
+			"id":"ws_1",
+			"status":"completed",
+			"action":{
+				"type":"search",
+				"query":"qwer1234",
+				"sources":[{"type":"url","url":"https://openai.com"}]
+			}
+		}
+	}`)
+
+	event, err := DecodeOpenAIResponsesStreamEvent("response.output_item.done", data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event == nil {
+		t.Fatal("event is nil")
+	}
+	if event.Type != StreamEventContentBlockStart {
+		t.Fatalf("Type = %q, want %q", event.Type, StreamEventContentBlockStart)
+	}
+	if event.Index != webSearchToolResultStreamIndex(0) {
+		t.Fatalf("Index = %d, want %d", event.Index, webSearchToolResultStreamIndex(0))
+	}
+	if event.Delta == nil || event.Delta.Type != ContentTypeWebSearchToolResult {
+		t.Fatalf("Delta = %+v, want web_search_tool_result", event.Delta)
+	}
+	if event.Delta.WebSearchToolResult == nil {
+		t.Fatal("Delta.WebSearchToolResult is nil")
+	}
+	if event.Delta.WebSearchToolResult.ToolUseID != "ws_1" {
+		t.Errorf("ToolUseID = %q, want ws_1", event.Delta.WebSearchToolResult.ToolUseID)
+	}
+	if len(event.Delta.WebSearchToolResult.Content) != 1 {
+		t.Fatalf("Content len = %d, want 1", len(event.Delta.WebSearchToolResult.Content))
+	}
+	if event.Delta.WebSearchToolResult.Content[0].URL != "https://openai.com" {
+		t.Errorf("Content[0].URL = %q, want https://openai.com", event.Delta.WebSearchToolResult.Content[0].URL)
 	}
 }
 
