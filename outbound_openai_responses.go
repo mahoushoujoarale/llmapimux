@@ -103,7 +103,7 @@ func (c *OpenAIResponsesClient) SendStream(ctx context.Context, req *Request, cf
 			}
 
 			eventType := reader.LastEventType()
-			event, err := DecodeOpenAIResponsesStreamEvent(eventType, data)
+			events, err := DecodeOpenAIResponsesStreamEvent(eventType, data)
 			if err != nil {
 				select {
 				case ch <- StreamResult{Err: fmt.Errorf("openai responses outbound stream decode: %w", err)}:
@@ -112,41 +112,45 @@ func (c *OpenAIResponsesClient) SendStream(ctx context.Context, req *Request, cf
 				return
 			}
 
-			// Skip nil events (some events may return nil)
-			if event == nil {
-				continue
-			}
-
-			// For indexed events, handle reasoning suppression and index remapping.
-			switch event.Type {
-			case StreamEventContentBlockStart, StreamEventContentBlockStop, StreamEventDelta:
-				if event.Type == StreamEventContentBlockStart && event.Delta == nil {
-					// No delta type means this is a reasoning or unknown item — suppress it.
-					reasoningIndices[event.Index] = true
+			done := false
+			for _, event := range events {
+				if event == nil {
 					continue
 				}
-				if reasoningIndices[event.Index] {
-					if event.Type == StreamEventContentBlockStop {
-						delete(reasoningIndices, event.Index)
+
+				// For indexed events, handle reasoning suppression and index remapping.
+				switch event.Type {
+				case StreamEventContentBlockStart, StreamEventContentBlockStop, StreamEventDelta:
+					if event.Type == StreamEventContentBlockStart && event.Delta == nil {
+						// No delta type means this is a reasoning or unknown item — suppress it.
+						reasoningIndices[event.Index] = true
+						continue
 					}
-					continue
+					if reasoningIndices[event.Index] {
+						if event.Type == StreamEventContentBlockStop {
+							delete(reasoningIndices, event.Index)
+						}
+						continue
+					}
+					// Remap to compact sequential index starting at 0.
+					if _, ok := indexRemap[event.Index]; !ok {
+						indexRemap[event.Index] = nextSeqIndex
+						nextSeqIndex++
+					}
+					event.Index = indexRemap[event.Index]
 				}
-				// Remap to compact sequential index starting at 0.
-				if _, ok := indexRemap[event.Index]; !ok {
-					indexRemap[event.Index] = nextSeqIndex
-					nextSeqIndex++
+
+				select {
+				case ch <- StreamResult{Event: event}:
+				case <-ctx.Done():
+					return
 				}
-				event.Index = indexRemap[event.Index]
-			}
 
-			select {
-			case ch <- StreamResult{Event: event}:
-			case <-ctx.Done():
-				return
+				if event.Type == StreamEventStop {
+					done = true
+				}
 			}
-
-			// Stop after response.completed
-			if event.Type == StreamEventStop {
+			if done {
 				return
 			}
 		}

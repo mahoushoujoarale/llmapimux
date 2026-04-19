@@ -186,9 +186,14 @@ func decodeOaiRespToolChoice(raw json.RawMessage, tools []Tool) (*ToolChoice, er
 		return nil, err
 	}
 
+	// A tool_choice object without a type field is malformed; degrade to "auto"
+	// rather than returning an error — strictness here would leak upstream
+	// sloppy payloads back to our callers as 400s.
 	var kind string
-	if err := json.Unmarshal(obj["type"], &kind); err != nil {
-		return nil, err
+	if typeRaw, ok := obj["type"]; ok && len(typeRaw) > 0 {
+		if err := json.Unmarshal(typeRaw, &kind); err != nil {
+			return nil, err
+		}
 	}
 	switch kind {
 	case "function":
@@ -212,21 +217,27 @@ func decodeOaiRespToolChoice(raw json.RawMessage, tools []Tool) (*ToolChoice, er
 				return nil, err
 			}
 			for _, tool := range allowed {
-				var toolType string
-				if err := json.Unmarshal(tool["type"], &toolType); err != nil {
-					return nil, err
+				// Preserve both function and built-in entries — built-in tools
+				// use their type string as the logical name (e.g. "web_search"),
+				// which aligns with how DecodeAnthropicRequest names server-side
+				// tools by defaultToolNameForType and keeps round-trips honest.
+				var toolType, name string
+				if typeRaw, ok := tool["type"]; ok && len(typeRaw) > 0 {
+					if err := json.Unmarshal(typeRaw, &toolType); err != nil {
+						return nil, err
+					}
 				}
-				if normalizeOpenAIResponsesToolType(toolType) != "function" {
-					continue
-				}
-				if nameRaw, ok := tool["name"]; ok {
-					var name string
+				if nameRaw, ok := tool["name"]; ok && len(nameRaw) > 0 {
 					if err := json.Unmarshal(nameRaw, &name); err != nil {
 						return nil, err
 					}
-					if name != "" {
-						tc.AllowedToolNames = append(tc.AllowedToolNames, name)
-					}
+				}
+				normalized := normalizeOpenAIResponsesToolType(toolType)
+				if name == "" && !isFunctionToolType(normalized) {
+					name = defaultToolNameForType(normalized)
+				}
+				if name != "" {
+					tc.AllowedToolNames = append(tc.AllowedToolNames, name)
 				}
 			}
 		}
@@ -234,11 +245,17 @@ func decodeOaiRespToolChoice(raw json.RawMessage, tools []Tool) (*ToolChoice, er
 			tc.Type = "auto"
 		}
 		return tc, nil
-	case "auto", "none", "required":
+	case "auto", "none", "required", "":
+		// Empty kind falls through here (see defensive parse above).
+		if kind == "" {
+			kind = "auto"
+		}
 		return &ToolChoice{Type: kind}, nil
 	default:
-		tc := &ToolChoice{Type: "tool"}
+		// Named built-in selector like {"type":"web_search"}. Try to resolve a
+		// matching tool from the request, fall back to the type-as-name.
 		normalized := normalizeOpenAIResponsesToolType(kind)
+		tc := &ToolChoice{Type: "tool"}
 		if tool := findToolByType(tools, normalized); tool != nil && tool.Name != "" {
 			tc.ToolName = tool.Name
 		} else {
@@ -501,10 +518,20 @@ func EncodeOpenAIResponsesRequest(req *Request) ([]byte, error) {
 		raw.Input = data
 	}
 
-	// Tools
+	// Tools — drop IR tool types with no OpenAI Responses representation
+	// (e.g. Anthropic bash_*, computer_*, text_editor_*). Forwarding them as
+	// raw type strings would trigger upstream 400 "unknown tool type" errors.
+	// The sanitized name set is passed to tool_choice sanitization below so a
+	// named selector pointing at a dropped tool can degrade to "auto" instead
+	// of reaching the provider and being rejected.
+	encodedToolNames := map[string]bool{}
+	survivingTools := make([]Tool, 0, len(req.Tools))
 	if len(req.Tools) > 0 {
 		tools := make([]openairesponses.Tool, 0, len(req.Tools))
 		for i, t := range req.Tools {
+			if !isOpenAIResponsesSupportedToolType(t.Type) {
+				continue
+			}
 			extraFields, err := encodeOpenAIResponsesToolExtraFields(t.Type, t.ExtraFields)
 			if err != nil {
 				return nil, fmt.Errorf("encode openai responses request tools[%d]: %w", i, err)
@@ -520,17 +547,29 @@ func EncodeOpenAIResponsesRequest(req *Request) ([]byte, error) {
 				tool.Strict = t.Strict
 			}
 			tools = append(tools, tool)
+			survivingTools = append(survivingTools, t)
+			if t.Name != "" {
+				encodedToolNames[t.Name] = true
+			}
 		}
-		raw.Tools = tools
+		if len(tools) > 0 {
+			raw.Tools = tools
+		}
 	}
 
-	// Tool choice
+	// Tool choice — sanitize against the surviving tool set. When tools were
+	// emptied entirely or the named selector points at a dropped tool, the
+	// sanitizer degrades or drops the choice so the outbound request stays
+	// valid for strict providers.
 	if req.ToolChoice != nil {
-		tc, err := encodeOaiRespToolChoice(req)
-		if err != nil {
-			return nil, fmt.Errorf("encode openai responses request tool_choice: %w", err)
+		effective := sanitizeToolChoiceForEncode(req.ToolChoice, encodedToolNames, len(raw.Tools))
+		if effective != nil {
+			tc, err := encodeOaiRespToolChoice(&Request{Tools: survivingTools, ToolChoice: effective})
+			if err != nil {
+				return nil, fmt.Errorf("encode openai responses request tool_choice: %w", err)
+			}
+			raw.ToolChoice = tc
 		}
-		raw.ToolChoice = tc
 
 		// AllowParallelCalls → parallel_tool_calls (top-level)
 		if req.ToolChoice.AllowParallelCalls != nil {
@@ -873,15 +912,39 @@ func decodeOaiRespWebSearchCallParts(item openairesponses.OutputItem) ([]Content
 	return result, nil
 }
 
-func decodeOaiRespWebSearchResultPart(item openairesponses.OutputItem) (*ContentPart, error) {
+// decodeOaiRespWebSearchCallStreamEvents expands an OpenAI Responses
+// `response.output_item.done` event carrying a web_search_call into the
+// Anthropic-compatible sequence:
+//
+//	[content_block_start(server_tool_use), content_block_stop(server_tool_use),
+//	 content_block_start(web_search_tool_result), content_block_stop(web_search_tool_result)]
+//
+// The two blocks use distinct indices — server_tool_use keeps the original
+// OpenAI output index, and the tool result uses webSearchToolResultStreamIndex
+// to avoid collision — and the outbound layer remaps them to sequential
+// Anthropic block indices.
+func decodeOaiRespWebSearchCallStreamEvents(item openairesponses.OutputItem, outputIndex int) ([]*StreamEvent, error) {
 	parts, err := decodeOaiRespWebSearchCallParts(item)
 	if err != nil {
 		return nil, err
 	}
-	if len(parts) < 2 {
+	if len(parts) == 0 {
 		return nil, nil
 	}
-	return &parts[1], nil
+	serverIdx := outputIndex
+	resultIdx := webSearchToolResultStreamIndex(outputIndex)
+	events := make([]*StreamEvent, 0, 4)
+	events = append(events,
+		&StreamEvent{Type: StreamEventContentBlockStart, Index: serverIdx, Delta: &parts[0]},
+		&StreamEvent{Type: StreamEventContentBlockStop, Index: serverIdx},
+	)
+	if len(parts) > 1 {
+		events = append(events,
+			&StreamEvent{Type: StreamEventContentBlockStart, Index: resultIdx, Delta: &parts[1]},
+			&StreamEvent{Type: StreamEventContentBlockStop, Index: resultIdx},
+		)
+	}
+	return events, nil
 }
 
 // --- Response decode/encode ---
@@ -1057,9 +1120,14 @@ func EncodeOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 // --- Streaming decode/encode ---
 
 // DecodeOpenAIResponsesStreamEvent decodes an OpenAI Responses API SSE event into
-// the unified IR StreamEvent.
+// zero or more unified IR StreamEvents. Returns ([]*StreamEvent, nil) on success
+// (the slice may be nil for events that should be skipped), or (nil, err) on a
+// protocol-level decode failure. A single OpenAI event may fan out into several
+// IR events — for example, a completed web_search_call produces both the
+// server_tool_use and the web_search_tool_result blocks.
+//
 // eventType is from the SSE "event:" line, data is the JSON from the SSE "data:" line.
-func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEvent, error) {
+func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) ([]*StreamEvent, error) {
 	switch eventType {
 	case "response.created":
 		var raw openairesponses.StreamEvent
@@ -1075,7 +1143,7 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEve
 				Model: raw.Response.Model,
 			}
 		}
-		return event, nil
+		return []*StreamEvent{event}, nil
 
 	case "response.output_item.added":
 		var raw openairesponses.StreamEvent
@@ -1102,10 +1170,14 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEve
 					},
 				}
 			case "web_search_call":
+				// Defer emission until response.output_item.done, when the
+				// action payload (query, sources) is available. Emitting a
+				// start with an empty ServerToolUse here would leave Anthropic
+				// clients waiting for input_json_delta events that never arrive.
 				return nil, nil
 			}
 		}
-		return event, nil
+		return []*StreamEvent{event}, nil
 
 	case "response.content_part.added":
 		// Skipped — response.output_item.added is the canonical block start.
@@ -1116,21 +1188,21 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEve
 		if err := json.Unmarshal(data, &raw); err != nil {
 			return nil, fmt.Errorf("decode openai responses stream output_text.delta: %w", err)
 		}
-		return &StreamEvent{
+		return []*StreamEvent{{
 			Type:  StreamEventDelta,
 			Index: derefIntPtr(raw.OutputIndex),
 			Delta: &ContentPart{
 				Type: ContentTypeText,
 				Text: &TextContent{Text: raw.Delta},
 			},
-		}, nil
+		}}, nil
 
 	case "response.function_call_arguments.delta":
 		var raw openairesponses.StreamEvent
 		if err := json.Unmarshal(data, &raw); err != nil {
 			return nil, fmt.Errorf("decode openai responses stream function_call_arguments.delta: %w", err)
 		}
-		return &StreamEvent{
+		return []*StreamEvent{{
 			Type:  StreamEventDelta,
 			Index: derefIntPtr(raw.OutputIndex),
 			Delta: &ContentPart{
@@ -1139,7 +1211,7 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEve
 					Arguments: json.RawMessage(raw.Delta),
 				},
 			},
-		}, nil
+		}}, nil
 
 	case "response.output_item.done":
 		var raw openairesponses.StreamEvent
@@ -1147,26 +1219,28 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEve
 			return nil, fmt.Errorf("decode openai responses stream output_item.done: %w", err)
 		}
 		if raw.Item != nil && raw.Item.Type == "web_search_call" {
-			part, err := decodeOaiRespWebSearchResultPart(*raw.Item)
+			events, err := decodeOaiRespWebSearchCallStreamEvents(*raw.Item, derefIntPtr(raw.OutputIndex))
 			if err != nil {
 				return nil, fmt.Errorf("decode openai responses stream web_search_call done: %w", err)
 			}
-			if part == nil {
-				return nil, nil
-			}
-			return &StreamEvent{
-				Type:  StreamEventContentBlockStart,
-				Index: webSearchToolResultStreamIndex(derefIntPtr(raw.OutputIndex)),
-				Delta: part,
-			}, nil
+			return events, nil
 		}
-		return &StreamEvent{
+		return []*StreamEvent{{
 			Type:  StreamEventContentBlockStop,
 			Index: derefIntPtr(raw.OutputIndex),
-		}, nil
+		}}, nil
 
 	case "response.content_part.done":
 		// Skipped — response.output_item.done is the canonical block stop.
+		return nil, nil
+
+	case "response.web_search_call.in_progress",
+		"response.web_search_call.searching",
+		"response.web_search_call.completed":
+		// Progress hints — Anthropic's streaming protocol has no equivalent
+		// intermediate event for server tools, so drop them here. The full
+		// server_tool_use / web_search_tool_result pair is emitted from
+		// response.output_item.done once the action payload is known.
 		return nil, nil
 
 	case "response.completed":
@@ -1192,7 +1266,7 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEve
 				event.StopReason = &sr
 			}
 		}
-		return event, nil
+		return []*StreamEvent{event}, nil
 
 	case "response.output_text.done", "response.function_call_arguments.done":
 		// Skipped — response.output_item.done is the canonical block stop.
@@ -1216,7 +1290,7 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEve
 				event.Usage = &u
 			}
 		}
-		return event, nil
+		return []*StreamEvent{event}, nil
 
 	case "response.incomplete":
 		var raw openairesponses.StreamEvent
@@ -1233,7 +1307,7 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEve
 			u := decodeOaiRespUsage(raw.Response.Usage)
 			event.Usage = &u
 		}
-		return event, nil
+		return []*StreamEvent{event}, nil
 
 	case "error":
 		// Top-level error event
@@ -1246,7 +1320,7 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEve
 		if err := json.Unmarshal(data, &errPayload); err != nil {
 			return nil, fmt.Errorf("decode openai responses stream error: %w", err)
 		}
-		return &StreamEvent{
+		return []*StreamEvent{{
 			Type: StreamEventError,
 			Error: &StreamError{
 				Type:    errPayload.Type,
@@ -1254,21 +1328,21 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) (*StreamEve
 				Message: errPayload.Message,
 				Param:   errPayload.Param,
 			},
-		}, nil
+		}}, nil
 
 	case "response.refusal.delta":
 		var raw openairesponses.StreamEvent
 		if err := json.Unmarshal(data, &raw); err != nil {
 			return nil, fmt.Errorf("decode openai responses stream response.refusal.delta: %w", err)
 		}
-		return &StreamEvent{
+		return []*StreamEvent{{
 			Type:  StreamEventDelta,
 			Index: derefIntPtr(raw.OutputIndex),
 			Delta: &ContentPart{
 				Type:    ContentTypeRefusal,
 				Refusal: &RefusalContent{Refusal: raw.Delta},
 			},
-		}, nil
+		}}, nil
 
 	default:
 		// Unknown event types (response.in_progress, etc.) — return nil to skip

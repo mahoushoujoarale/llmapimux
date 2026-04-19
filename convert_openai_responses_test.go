@@ -7,6 +7,16 @@ import (
 	"github.com/llmapimux/llmapimux/protocol/openairesponses"
 )
 
+// firstStreamEvent returns the first IR event from a multi-event decode, or nil
+// if the slice is empty. Tests that expect exactly one event should also assert
+// len(events) == 1 before calling this.
+func firstStreamEvent(events []*StreamEvent) *StreamEvent {
+	if len(events) == 0 {
+		return nil
+	}
+	return events[0]
+}
+
 func TestDecodeOpenAIResponsesRequest_StringInput(t *testing.T) {
 	body := []byte(`{
 		"model": "gpt-4o",
@@ -816,10 +826,15 @@ func TestEncodeOpenAIResponsesRequest_Basic(t *testing.T) {
 }
 
 func TestEncodeOpenAIResponsesRequest_ToolChoiceObject(t *testing.T) {
+	// With a matching function tool in req.Tools, the tool_choice object
+	// should carry through to the OpenAI Responses wire format.
 	req := &Request{
 		Model: "gpt-4o",
 		Messages: []Message{
 			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}}}},
+		},
+		Tools: []Tool{
+			{Type: "function", Name: "read_file", Parameters: json.RawMessage(`{"type":"object"}`)},
 		},
 		ToolChoice: &ToolChoice{Type: "tool", ToolName: "read_file"},
 	}
@@ -839,6 +854,137 @@ func TestEncodeOpenAIResponsesRequest_ToolChoiceObject(t *testing.T) {
 	}
 	if tc["name"] != "read_file" {
 		t.Errorf("tool_choice.name = %q, want %q", tc["name"], "read_file")
+	}
+}
+
+func TestEncodeOpenAIResponsesRequest_ToolChoiceDegradesWhenNamedToolMissing(t *testing.T) {
+	// A ToolChoice that references a tool not present in req.Tools would
+	// previously emit {"type":"function","name":"..."} and reproduce the
+	// upstream 400 "Tool choice 'function' not found in 'tools' parameter".
+	// The sanitizer degrades the named selector to "auto" instead.
+	req := &Request{
+		Model: "gpt-4o",
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}}}},
+		},
+		ToolChoice: &ToolChoice{Type: "tool", ToolName: "read_file"},
+	}
+
+	data, err := EncodeOpenAIResponsesRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	json.Unmarshal(data, &raw)
+
+	if _, ok := raw["tools"]; ok {
+		t.Errorf("tools was emitted but is expected to be omitted: %s", raw["tools"])
+	}
+	var tc string
+	if err := json.Unmarshal(raw["tool_choice"], &tc); err != nil {
+		t.Fatalf("tool_choice should degrade to string \"auto\", got raw=%s err=%v", raw["tool_choice"], err)
+	}
+	if tc != "auto" {
+		t.Errorf("tool_choice = %q, want \"auto\"", tc)
+	}
+}
+
+func TestDecodeOpenAIResponsesRequest_AllowedToolsPreservesBuiltIn(t *testing.T) {
+	// allowed_tools entries that name a built-in (e.g. web_search) must not
+	// be silently dropped. They round-trip into AllowedToolNames using the
+	// type string as the logical name, matching how Anthropic decode names
+	// server-side tools by defaultToolNameForType.
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":"hi",
+		"tools":[
+			{"type":"function","name":"read_file","parameters":{}},
+			{"type":"web_search"}
+		],
+		"tool_choice":{
+			"type":"allowed_tools",
+			"mode":"auto",
+			"tools":[
+				{"type":"function","name":"read_file"},
+				{"type":"web_search"}
+			]
+		}
+	}`)
+	req, err := DecodeOpenAIResponsesRequest(body)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if req.ToolChoice == nil {
+		t.Fatal("tool_choice is nil")
+	}
+	got := req.ToolChoice.AllowedToolNames
+	if len(got) != 2 || got[0] != "read_file" || got[1] != "web_search" {
+		t.Errorf("AllowedToolNames = %v, want [read_file web_search]", got)
+	}
+}
+
+func TestDecodeOpenAIResponsesRequest_ToolChoiceMissingTypeDegradesToAuto(t *testing.T) {
+	// A tool_choice object without "type" historically returned a hard error.
+	// Strictness here only hurts callers — degrade to auto.
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":"hi",
+		"tool_choice":{"name":"read_file"}
+	}`)
+	req, err := DecodeOpenAIResponsesRequest(body)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if req.ToolChoice == nil || req.ToolChoice.Type != "auto" {
+		t.Errorf("ToolChoice = %+v, want {Type: auto}", req.ToolChoice)
+	}
+}
+
+func TestEncodeOpenAIResponsesRequest_UnknownBuiltInToolsDropped(t *testing.T) {
+	// Anthropic server-side tools (bash, computer, text_editor) have no
+	// OpenAI Responses equivalent. The encoder should drop them from the
+	// outbound tools array instead of forwarding an unknown type string that
+	// triggers upstream validation errors. The named tool_choice that
+	// referenced one of them degrades to "auto".
+	req := &Request{
+		Model: "gpt-5",
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "ls"}}}},
+		},
+		Tools: []Tool{
+			{Type: "bash_20250124", Name: "bash"},
+			{Type: "function", Name: "read_file", Parameters: json.RawMessage(`{"type":"object"}`)},
+		},
+		ToolChoice: &ToolChoice{Type: "tool", ToolName: "bash"},
+	}
+
+	data, err := EncodeOpenAIResponsesRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	json.Unmarshal(data, &raw)
+
+	var tools []map[string]json.RawMessage
+	json.Unmarshal(raw["tools"], &tools)
+	if len(tools) != 1 {
+		t.Fatalf("expected exactly the function tool to survive, got %d tools: %s", len(tools), raw["tools"])
+	}
+	var typ, name string
+	json.Unmarshal(tools[0]["type"], &typ)
+	json.Unmarshal(tools[0]["name"], &name)
+	if typ != "function" || name != "read_file" {
+		t.Errorf("surviving tool = (%q, %q), want (function, read_file)", typ, name)
+	}
+
+	var tc string
+	if err := json.Unmarshal(raw["tool_choice"], &tc); err != nil {
+		t.Fatalf("tool_choice should degrade to string \"auto\", got: %s", raw["tool_choice"])
+	}
+	if tc != "auto" {
+		t.Errorf("tool_choice = %q, want \"auto\" (named selector pointed at dropped tool)", tc)
 	}
 }
 
@@ -1638,7 +1784,8 @@ func TestDecodeOpenAIResponsesStreamEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			event, err := DecodeOpenAIResponsesStreamEvent(tt.eventType, []byte(tt.data))
+			events, err := DecodeOpenAIResponsesStreamEvent(tt.eventType, []byte(tt.data))
+			event := firstStreamEvent(events)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -1669,38 +1816,98 @@ func TestDecodeOpenAIResponsesStreamEvent_WebSearchCallDone(t *testing.T) {
 		}
 	}`)
 
-	event, err := DecodeOpenAIResponsesStreamEvent("response.output_item.done", data)
+	events, err := DecodeOpenAIResponsesStreamEvent("response.output_item.done", data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if event == nil {
-		t.Fatal("event is nil")
+	if len(events) != 4 {
+		t.Fatalf("expected 4 events (server_tool_use start/stop + web_search_tool_result start/stop), got %d", len(events))
 	}
-	if event.Type != StreamEventContentBlockStart {
-		t.Fatalf("Type = %q, want %q", event.Type, StreamEventContentBlockStart)
+
+	serverStart, serverStop, resultStart, resultStop := events[0], events[1], events[2], events[3]
+
+	// server_tool_use block
+	if serverStart.Type != StreamEventContentBlockStart || serverStart.Index != 0 {
+		t.Fatalf("server_tool_use start = (%q, %d), want (content_block_start, 0)", serverStart.Type, serverStart.Index)
 	}
-	if event.Index != webSearchToolResultStreamIndex(0) {
-		t.Fatalf("Index = %d, want %d", event.Index, webSearchToolResultStreamIndex(0))
+	if serverStart.Delta == nil || serverStart.Delta.Type != ContentTypeServerToolUse {
+		t.Fatalf("server_tool_use start Delta = %+v, want ContentTypeServerToolUse", serverStart.Delta)
 	}
-	if event.Delta == nil || event.Delta.Type != ContentTypeWebSearchToolResult {
-		t.Fatalf("Delta = %+v, want web_search_tool_result", event.Delta)
+	if serverStart.Delta.ServerToolUse == nil || serverStart.Delta.ServerToolUse.ID != "ws_1" || serverStart.Delta.ServerToolUse.Name != "web_search" {
+		t.Fatalf("server_tool_use content = %+v, want id=ws_1 name=web_search", serverStart.Delta.ServerToolUse)
 	}
-	if event.Delta.WebSearchToolResult == nil {
-		t.Fatal("Delta.WebSearchToolResult is nil")
+	var args map[string]string
+	if err := json.Unmarshal(serverStart.Delta.ServerToolUse.Arguments, &args); err != nil {
+		t.Fatalf("unmarshal server_tool_use arguments: %v", err)
 	}
-	if event.Delta.WebSearchToolResult.ToolUseID != "ws_1" {
-		t.Errorf("ToolUseID = %q, want ws_1", event.Delta.WebSearchToolResult.ToolUseID)
+	if args["query"] != "qwer1234" {
+		t.Errorf("server_tool_use query = %q, want qwer1234", args["query"])
 	}
-	if len(event.Delta.WebSearchToolResult.Content) != 1 {
-		t.Fatalf("Content len = %d, want 1", len(event.Delta.WebSearchToolResult.Content))
+	if serverStop.Type != StreamEventContentBlockStop || serverStop.Index != 0 {
+		t.Errorf("server_tool_use stop = (%q, %d), want (content_block_stop, 0)", serverStop.Type, serverStop.Index)
 	}
-	if event.Delta.WebSearchToolResult.Content[0].URL != "https://openai.com" {
-		t.Errorf("Content[0].URL = %q, want https://openai.com", event.Delta.WebSearchToolResult.Content[0].URL)
+
+	// web_search_tool_result block
+	wantResultIdx := webSearchToolResultStreamIndex(0)
+	if resultStart.Type != StreamEventContentBlockStart || resultStart.Index != wantResultIdx {
+		t.Fatalf("result start = (%q, %d), want (content_block_start, %d)", resultStart.Type, resultStart.Index, wantResultIdx)
+	}
+	if resultStart.Delta == nil || resultStart.Delta.Type != ContentTypeWebSearchToolResult || resultStart.Delta.WebSearchToolResult == nil {
+		t.Fatalf("result start Delta = %+v, want ContentTypeWebSearchToolResult", resultStart.Delta)
+	}
+	if resultStart.Delta.WebSearchToolResult.ToolUseID != "ws_1" {
+		t.Errorf("result ToolUseID = %q, want ws_1", resultStart.Delta.WebSearchToolResult.ToolUseID)
+	}
+	if len(resultStart.Delta.WebSearchToolResult.Content) != 1 || resultStart.Delta.WebSearchToolResult.Content[0].URL != "https://openai.com" {
+		t.Errorf("result content = %+v, want 1 hit https://openai.com", resultStart.Delta.WebSearchToolResult.Content)
+	}
+	if resultStop.Type != StreamEventContentBlockStop || resultStop.Index != wantResultIdx {
+		t.Errorf("result stop = (%q, %d), want (content_block_stop, %d)", resultStop.Type, resultStop.Index, wantResultIdx)
+	}
+}
+
+func TestDecodeOpenAIResponsesStreamEvent_WebSearchCallProgressEvents(t *testing.T) {
+	// Progress events have no Anthropic equivalent; decoder should drop them
+	// without error. Input payload shape matches real OpenAI Responses output.
+	for _, evt := range []string{
+		"response.web_search_call.in_progress",
+		"response.web_search_call.searching",
+		"response.web_search_call.completed",
+	} {
+		t.Run(evt, func(t *testing.T) {
+			events, err := DecodeOpenAIResponsesStreamEvent(evt, []byte(`{"output_index":0,"item_id":"ws_1"}`))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(events) != 0 {
+				t.Errorf("expected 0 events for progress hint %q, got %d", evt, len(events))
+			}
+		})
+	}
+}
+
+func TestDecodeOpenAIResponsesStreamEvent_WebSearchCallAddedDeferred(t *testing.T) {
+	// response.output_item.added for web_search_call must not emit a start event —
+	// the server_tool_use block is only valid after output_item.done exposes the
+	// action payload. Emitting a start with empty args would strand the Anthropic
+	// client waiting for input_json_delta events that never arrive.
+	data := []byte(`{
+		"type":"response.output_item.added",
+		"output_index":0,
+		"item":{"type":"web_search_call","id":"ws_1"}
+	}`)
+	events, err := DecodeOpenAIResponsesStreamEvent("response.output_item.added", data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events for deferred web_search_call added, got %d", len(events))
 	}
 }
 
 func TestDecodeOpenAIResponsesStreamEvent_Unknown(t *testing.T) {
-	event, err := DecodeOpenAIResponsesStreamEvent("response.in_progress", []byte(`{}`))
+	events, err := DecodeOpenAIResponsesStreamEvent("response.in_progress", []byte(`{}`))
+	event := firstStreamEvent(events)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1723,7 +1930,8 @@ func TestDecodeOpenAIResponsesStreamEvent_SkippedEvents(t *testing.T) {
 	}
 	for _, s := range skipped {
 		t.Run(s.eventType, func(t *testing.T) {
-			event, err := DecodeOpenAIResponsesStreamEvent(s.eventType, []byte(s.data))
+			events, err := DecodeOpenAIResponsesStreamEvent(s.eventType, []byte(s.data))
+			event := firstStreamEvent(events)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -2758,7 +2966,8 @@ func TestDecodeOpenAIResponsesStreamEvent_ResponseFailed(t *testing.T) {
 		}
 	}`)
 
-	event, err := DecodeOpenAIResponsesStreamEvent("response.failed", data)
+	events, err := DecodeOpenAIResponsesStreamEvent("response.failed", data)
+	event := firstStreamEvent(events)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2790,7 +2999,8 @@ func TestDecodeOpenAIResponsesStreamEvent_ResponseIncomplete(t *testing.T) {
 		}
 	}`)
 
-	event, err := DecodeOpenAIResponsesStreamEvent("response.incomplete", data)
+	events, err := DecodeOpenAIResponsesStreamEvent("response.incomplete", data)
+	event := firstStreamEvent(events)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2826,7 +3036,8 @@ func TestDecodeOpenAIResponsesStreamEvent_Error(t *testing.T) {
 		"param": "model"
 	}`)
 
-	event, err := DecodeOpenAIResponsesStreamEvent("error", data)
+	events, err := DecodeOpenAIResponsesStreamEvent("error", data)
+	event := firstStreamEvent(events)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2858,7 +3069,8 @@ func TestDecodeOpenAIResponsesStreamEvent_RefusalDelta(t *testing.T) {
 		"delta": "I cannot"
 	}`)
 
-	event, err := DecodeOpenAIResponsesStreamEvent("response.refusal.delta", data)
+	events, err := DecodeOpenAIResponsesStreamEvent("response.refusal.delta", data)
+	event := firstStreamEvent(events)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
