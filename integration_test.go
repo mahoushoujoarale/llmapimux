@@ -295,6 +295,25 @@ func TestIntegration_AnthropicToOpenAIResponses_PreservesBuiltInWebSearch(t *tes
 		t.Errorf("tools[0].filters.allowed_domains = %v, want [openai.com]", allowedDomains)
 	}
 
+	includeRaw, ok := gotBody["include"]
+	if !ok {
+		t.Fatal("include missing from outbound OpenAI Responses request")
+	}
+	var include []string
+	if err := json.Unmarshal(includeRaw, &include); err != nil {
+		t.Fatalf("unmarshal include: %v", err)
+	}
+	found := false
+	for _, item := range include {
+		if item == "web_search_call.action.sources" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("include = %v, want web_search_call.action.sources", include)
+	}
+
 	tcRaw, ok := gotBody["tool_choice"]
 	if !ok {
 		t.Fatal("tool_choice missing from outbound OpenAI Responses request")

@@ -2,10 +2,13 @@ package llmapimux
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 )
+
+const openAIResponsesWebSearchSourcesInclude = "web_search_call.action.sources"
 
 // OpenAIResponsesClient sends IR Requests to the OpenAI Responses API.
 type OpenAIResponsesClient struct {
@@ -23,6 +26,10 @@ func (c *OpenAIResponsesClient) Send(ctx context.Context, req *Request, cfg Outb
 		if err != nil {
 			return nil, fmt.Errorf("openai responses outbound merge extra: %w", err)
 		}
+	}
+	body, err = ensureOpenAIResponsesWebSearchInclude(body, req)
+	if err != nil {
+		return nil, fmt.Errorf("openai responses outbound include merge: %w", err)
 	}
 
 	respBody, err := doSend(ctx, c.HTTPClient, cfg, body,
@@ -49,6 +56,10 @@ func (c *OpenAIResponsesClient) SendStream(ctx context.Context, req *Request, cf
 		if err != nil {
 			return nil, fmt.Errorf("openai responses outbound stream merge extra: %w", err)
 		}
+	}
+	body, err = ensureOpenAIResponsesWebSearchInclude(body, &outboundReq)
+	if err != nil {
+		return nil, fmt.Errorf("openai responses outbound stream include merge: %w", err)
 	}
 
 	httpResp, err := doStreamSetup(ctx, c.HTTPClient, cfg, body,
@@ -142,4 +153,46 @@ func (c *OpenAIResponsesClient) SendStream(ctx context.Context, req *Request, cf
 	}()
 
 	return ch, nil
+}
+
+func ensureOpenAIResponsesWebSearchInclude(body []byte, req *Request) ([]byte, error) {
+	if !requestHasToolType(req, "web_search") {
+		return body, nil
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("unmarshal request body: %w", err)
+	}
+
+	var include []string
+	if includeRaw, ok := raw["include"]; ok && len(includeRaw) > 0 {
+		if err := json.Unmarshal(includeRaw, &include); err != nil {
+			return nil, fmt.Errorf("unmarshal include: %w", err)
+		}
+	}
+	for _, item := range include {
+		if item == openAIResponsesWebSearchSourcesInclude {
+			return body, nil
+		}
+	}
+	include = append(include, openAIResponsesWebSearchSourcesInclude)
+	includeRaw, err := json.Marshal(include)
+	if err != nil {
+		return nil, fmt.Errorf("marshal include: %w", err)
+	}
+	raw["include"] = includeRaw
+	return json.Marshal(raw)
+}
+
+func requestHasToolType(req *Request, toolType string) bool {
+	if req == nil {
+		return false
+	}
+	for _, tool := range req.Tools {
+		if tool.Type == toolType {
+			return true
+		}
+	}
+	return false
 }

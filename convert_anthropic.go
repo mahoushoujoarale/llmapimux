@@ -725,13 +725,17 @@ func encodeAnthropicContentPart(p ContentPart) (anthropic.ContentBlock, error) {
 			b.ToolUseID = p.WebSearchToolResult.ToolUseID
 			b.IsError = p.WebSearchToolResult.IsError
 			b.ErrorCode = p.WebSearchToolResult.ErrorCode
-			if p.WebSearchToolResult.IsError && p.WebSearchToolResult.ErrorCode != "" {
-				raw, err := json.Marshal(map[string]string{"error_code": p.WebSearchToolResult.ErrorCode})
+			if p.WebSearchToolResult.IsError {
+				payload := map[string]string{}
+				if p.WebSearchToolResult.ErrorCode != "" {
+					payload["error_code"] = p.WebSearchToolResult.ErrorCode
+				}
+				raw, err := json.Marshal(payload)
 				if err != nil {
 					return anthropic.ContentBlock{}, fmt.Errorf("web_search_tool_result error marshal: %w", err)
 				}
 				b.ContentRaw = raw
-			} else if len(p.WebSearchToolResult.Content) > 0 {
+			} else {
 				raw, err := json.Marshal(p.WebSearchToolResult.Content)
 				if err != nil {
 					return anthropic.ContentBlock{}, fmt.Errorf("web_search_tool_result content marshal: %w", err)

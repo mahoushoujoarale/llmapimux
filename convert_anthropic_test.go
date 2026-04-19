@@ -1065,6 +1065,52 @@ func TestEncodeAnthropicResponse_WebSearchBlocks(t *testing.T) {
 	}
 }
 
+func TestEncodeAnthropicResponse_WebSearchBlocks_EmptySuccessIncludesContentArray(t *testing.T) {
+	resp := &Response{
+		ID:         "msg_ws_empty",
+		Model:      "claude-sonnet-4-20250514",
+		StopReason: StopReasonEndTurn,
+		Content: []ContentPart{
+			{
+				Type: ContentTypeWebSearchToolResult,
+				WebSearchToolResult: &WebSearchToolResultContent{
+					ToolUseID: "ws_1",
+				},
+			},
+		},
+	}
+
+	body, err := EncodeAnthropicResponse(resp)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	var content []map[string]json.RawMessage
+	if err := json.Unmarshal(raw["content"], &content); err != nil {
+		t.Fatalf("unmarshal content: %v", err)
+	}
+	if len(content) != 1 {
+		t.Fatalf("content len = %d, want 1", len(content))
+	}
+
+	contentRaw, ok := content[0]["content"]
+	if !ok {
+		t.Fatal("content[0].content missing, want empty array")
+	}
+	var hits []map[string]json.RawMessage
+	if err := json.Unmarshal(contentRaw, &hits); err != nil {
+		t.Fatalf("unmarshal content[0].content: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("content[0].content len = %d, want 0", len(hits))
+	}
+}
+
 func TestEncodeAnthropicResponse_PauseTurn(t *testing.T) {
 	resp := &Response{
 		ID:         "msg_pause",
@@ -1523,6 +1569,45 @@ func TestEncodeAnthropicStreamEvent_ContentBlockStart_WebSearchToolResult(t *tes
 	}
 	if block["tool_use_id"] != "ws_1" {
 		t.Errorf("content_block.tool_use_id = %v, want ws_1", block["tool_use_id"])
+	}
+}
+
+func TestEncodeAnthropicStreamEvent_ContentBlockStart_WebSearchToolResult_EmptySuccessIncludesContentArray(t *testing.T) {
+	event := &StreamEvent{
+		Type:  StreamEventContentBlockStart,
+		Index: 2,
+		Delta: &ContentPart{
+			Type: ContentTypeWebSearchToolResult,
+			WebSearchToolResult: &WebSearchToolResultContent{
+				ToolUseID: "ws_1",
+			},
+		},
+	}
+	eventType, data, err := EncodeAnthropicStreamEvent(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eventType != "content_block_start" {
+		t.Errorf("eventType = %q, want content_block_start", eventType)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var block map[string]json.RawMessage
+	if err := json.Unmarshal(raw["content_block"], &block); err != nil {
+		t.Fatalf("unmarshal content_block: %v", err)
+	}
+	contentRaw, ok := block["content"]
+	if !ok {
+		t.Fatal("content_block.content missing, want empty array")
+	}
+	var hits []map[string]json.RawMessage
+	if err := json.Unmarshal(contentRaw, &hits); err != nil {
+		t.Fatalf("unmarshal content_block.content: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("content_block.content len = %d, want 0", len(hits))
 	}
 }
 

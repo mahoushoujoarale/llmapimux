@@ -67,6 +67,54 @@ func TestOpenAIResponsesClient_Send(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesClient_Send_WebSearchAddsInclude(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]json.RawMessage
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			t.Fatalf("unmarshal request: %v", err)
+		}
+
+		includeRaw, ok := parsed["include"]
+		if !ok {
+			t.Fatal("include missing from request")
+		}
+		var include []string
+		if err := json.Unmarshal(includeRaw, &include); err != nil {
+			t.Fatalf("unmarshal include: %v", err)
+		}
+		found := false
+		for _, item := range include {
+			if item == "web_search_call.action.sources" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("include = %v, want web_search_call.action.sources", include)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","model":"gpt-4o","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello!"}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`))
+	}))
+	defer server.Close()
+
+	client := &OpenAIResponsesClient{}
+	cfg := OutboundConfig{BaseURL: server.URL, APIKey: "sk-test"}
+	req := &Request{
+		Model:     "gpt-4o",
+		MaxTokens: 1024,
+		Messages:  []Message{{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hi"}}}}},
+		Tools: []Tool{
+			{Type: "web_search", Name: "web_search"},
+		},
+	}
+
+	if _, err := client.Send(context.Background(), req, cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOpenAIResponsesClient_SendStream_StopsOnContextCancel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
