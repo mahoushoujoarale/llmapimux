@@ -15,27 +15,9 @@ import (
 // Field names use camelCase to match the official Gemini REST API (proto3 JSON encoding)
 // and the google.golang.org/genai SDK serialization format.
 
-
-
-
-
-
-
-
-
-
-
-
-
 // --- Response types ---
 
-
-
-
-
-
 // --- Gemini Schema types ---
-
 
 // --- Schema conversion helpers ---
 
@@ -366,13 +348,13 @@ func DecodeGeminiRequest(urlPath string, body []byte) (*Request, error) {
 
 // geminiToolCorrelator tracks synthetic tool IDs across Gemini contents in a single request.
 type geminiToolCorrelator struct {
-	idsByName map[string][]string
+	idsByName  map[string][]string
 	nextByName map[string]int
 }
 
 func newGeminiToolCorrelator() *geminiToolCorrelator {
 	return &geminiToolCorrelator{
-		idsByName: make(map[string][]string),
+		idsByName:  make(map[string][]string),
 		nextByName: make(map[string]int),
 	}
 }
@@ -591,10 +573,17 @@ func EncodeGeminiRequest(req *Request) (model string, body []byte, err error) {
 		raw.Contents = contents
 	}
 
-	// Tools
+	// Tools — only function tools round-trip into Gemini's FunctionDeclarations.
+	// Server-side tools (Anthropic web_search, bash, computer, text_editor) have
+	// no function-declaration representation and must be dropped so Gemini does
+	// not receive a function with no parameters and 400 the request.
+	encodedToolNames := map[string]bool{}
 	if len(req.Tools) > 0 {
 		decls := make([]gemini.FunctionDeclaration, 0, len(req.Tools))
 		for _, t := range req.Tools {
+			if !isGeminiSupportedToolType(t.Type) {
+				continue
+			}
 			fd := gemini.FunctionDeclaration{
 				Name:        t.Name,
 				Description: t.Description,
@@ -607,31 +596,46 @@ func EncodeGeminiRequest(req *Request) (model string, body []byte, err error) {
 				fd.Parameters = gemParams
 			}
 			decls = append(decls, fd)
+			if t.Name != "" {
+				encodedToolNames[t.Name] = true
+			}
 		}
-		raw.Tools = []gemini.ToolDeclaration{{FunctionDeclarations: decls}}
+		if len(decls) > 0 {
+			raw.Tools = []gemini.ToolDeclaration{{FunctionDeclarations: decls}}
+		}
 	}
 
-	// Tool choice
+	// Tool choice — sanitize against the surviving tool set. Gemini requires
+	// tool_config to reference known function names; degrading here avoids
+	// provider-side errors when an Anthropic named selector points at a
+	// dropped server tool.
 	if req.ToolChoice != nil {
-		var mode string
-		switch req.ToolChoice.Type {
-		case "auto":
-			mode = "AUTO"
-		case "none":
-			mode = "NONE"
-		case "required":
-			mode = "ANY"
-		default:
-			mode = strings.ToUpper(req.ToolChoice.Type)
+		hasTools := len(raw.Tools) > 0 && len(raw.Tools[0].FunctionDeclarations) > 0
+		toolCount := 0
+		if hasTools {
+			toolCount = len(raw.Tools[0].FunctionDeclarations)
 		}
-		fcc := &gemini.FunctionCallingConfig{Mode: mode}
-		// AllowedToolNames → allowedFunctionNames
-		if len(req.ToolChoice.AllowedToolNames) > 0 {
-			fcc.AllowedFunctionNames = req.ToolChoice.AllowedToolNames
-		}
-		// AllowParallelCalls: Gemini has no parallel_tool_calls equivalent — silently drop
-		raw.ToolConfig = &gemini.ToolConfig{
-			FunctionCallingConfig: fcc,
+		effective := sanitizeToolChoiceForEncode(req.ToolChoice, encodedToolNames, toolCount)
+		if effective != nil {
+			var mode string
+			switch effective.Type {
+			case "auto":
+				mode = "AUTO"
+			case "none":
+				mode = "NONE"
+			case "required":
+				mode = "ANY"
+			default:
+				mode = strings.ToUpper(effective.Type)
+			}
+			fcc := &gemini.FunctionCallingConfig{Mode: mode}
+			if len(effective.AllowedToolNames) > 0 {
+				fcc.AllowedFunctionNames = effective.AllowedToolNames
+			}
+			// AllowParallelCalls: Gemini has no parallel_tool_calls equivalent — silently drop.
+			raw.ToolConfig = &gemini.ToolConfig{
+				FunctionCallingConfig: fcc,
+			}
 		}
 	}
 
@@ -883,10 +887,10 @@ func DecodeGeminiResponse(body []byte) (*Response, error) {
 	// Usage
 	if raw.UsageMetadata != nil {
 		resp.Usage = Usage{
-			InputTokens:    raw.UsageMetadata.PromptTokenCount,
-			OutputTokens:   raw.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:    raw.UsageMetadata.TotalTokenCount,
-			ThinkingTokens: raw.UsageMetadata.ThoughtsTokenCount,
+			InputTokens:     raw.UsageMetadata.PromptTokenCount,
+			OutputTokens:    raw.UsageMetadata.CandidatesTokenCount,
+			TotalTokens:     raw.UsageMetadata.TotalTokenCount,
+			ThinkingTokens:  raw.UsageMetadata.ThoughtsTokenCount,
 			CacheReadTokens: raw.UsageMetadata.CachedContentTokenCount,
 		}
 	}

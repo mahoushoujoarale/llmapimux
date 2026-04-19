@@ -532,10 +532,10 @@ func TestEncodeOpenAIChatRequest_Basic(t *testing.T) {
 				},
 			},
 		},
-		MaxTokens:   1024,
-		Temperature: &temp,
-		TopP:        &topP,
-		Stream:      true,
+		MaxTokens:     1024,
+		Temperature:   &temp,
+		TopP:          &topP,
+		Stream:        true,
 		StopSequences: []string{"END"},
 	}
 
@@ -581,10 +581,16 @@ func TestEncodeOpenAIChatRequest_Basic(t *testing.T) {
 }
 
 func TestEncodeOpenAIChatRequest_ToolChoice(t *testing.T) {
+	// Named tool_choice must be accompanied by a matching tool in req.Tools,
+	// otherwise the sanitizer degrades it to "auto" to avoid the upstream
+	// "Tool choice 'function' not found in 'tools' parameter" 400.
 	req := &Request{
 		Model: "gpt-4o",
 		Messages: []Message{
 			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hi"}}}},
+		},
+		Tools: []Tool{
+			{Type: "function", Name: "read_file", Parameters: json.RawMessage(`{"type":"object"}`)},
 		},
 		ToolChoice: &ToolChoice{Type: "tool", ToolName: "read_file"},
 	}
@@ -609,6 +615,36 @@ func TestEncodeOpenAIChatRequest_ToolChoice(t *testing.T) {
 	fn := tc["function"].(map[string]interface{})
 	if fn["name"] != "read_file" {
 		t.Errorf("tool_choice.function.name = %v, want read_file", fn["name"])
+	}
+}
+
+func TestEncodeOpenAIChatRequest_NamedToolChoiceDegradesWhenMissing(t *testing.T) {
+	// Legacy bug reproduction: ToolChoice references a tool not listed in
+	// req.Tools. Pre-fix this emitted {"type":"function","function":{"name":"..."}}
+	// and was rejected upstream. Sanitizer degrades to "auto".
+	req := &Request{
+		Model: "gpt-4o",
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hi"}}}},
+		},
+		ToolChoice: &ToolChoice{Type: "tool", ToolName: "read_file"},
+	}
+
+	data, err := EncodeOpenAIChatRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	var tc string
+	if err := json.Unmarshal(raw["tool_choice"], &tc); err != nil {
+		t.Fatalf("tool_choice should degrade to string \"auto\", got raw=%s err=%v", raw["tool_choice"], err)
+	}
+	if tc != "auto" {
+		t.Errorf("tool_choice = %q, want \"auto\"", tc)
 	}
 }
 

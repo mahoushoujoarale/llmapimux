@@ -78,6 +78,42 @@ func isFunctionToolType(raw string) bool {
 	}
 }
 
+// isOpenAIResponsesSupportedToolType reports whether an IR tool type has a
+// known representation in the OpenAI Responses API. Anthropic server-side tools
+// such as bash_*, computer_*, and text_editor_* are preserved in IR so that
+// Anthropic-to-Anthropic passthroughs keep them, but they have no OpenAI
+// Responses equivalent and must be dropped before the request is sent.
+func isOpenAIResponsesSupportedToolType(irType string) bool {
+	if isFunctionToolType(irType) {
+		return true
+	}
+	switch openAIResponsesToolTypeFromIR(irType) {
+	case "web_search",
+		"web_search_preview",
+		"file_search",
+		"code_interpreter",
+		"computer_use",
+		"mcp":
+		return true
+	}
+	return false
+}
+
+// isOpenAIChatSupportedToolType reports whether an IR tool type is
+// representable in the OpenAI Chat Completions API. Chat Completions only
+// supports function tools.
+func isOpenAIChatSupportedToolType(irType string) bool {
+	return isFunctionToolType(irType)
+}
+
+// isGeminiSupportedToolType reports whether an IR tool type is representable
+// as a Gemini function declaration. Gemini has distinct request shapes for its
+// own built-in tools (google_search, code_execution) which do not round-trip
+// through function declarations, so anything non-function is dropped here.
+func isGeminiSupportedToolType(irType string) bool {
+	return isFunctionToolType(irType)
+}
+
 func defaultToolNameForType(raw string) string {
 	switch raw {
 	case "", "function", "custom":
@@ -116,6 +152,54 @@ func selectToolsByName(tools []Tool, names []string) []Tool {
 		}
 	}
 	return selected
+}
+
+// sanitizeToolChoiceForEncode adapts an IR ToolChoice against the tool set
+// that survived encoding. It only intervenes when the choice is a hard
+// reference to a specific tool:
+//
+//   - tc.Type == "tool" with ToolName not present in encodedToolNames →
+//     degrade to "auto" so the outbound JSON does not reach the provider as
+//     tool_choice={type:"function",name:X} with no matching tool, which
+//     reproduces the original "Tool choice 'function' not found in 'tools'"
+//     error class.
+//
+// Abstract choices (auto, none, required) and AllowedToolNames pass through
+// unchanged — AllowedToolNames is a soft hint in Gemini and providers that
+// strict-validate individual names generally tolerate a permissive list, so
+// we defer to provider-side validation instead of over-sanitizing here.
+// Returns nil when only AllowParallelCalls was set (empty Type, no
+// AllowedToolNames), so callers skip emitting an empty tool_choice object.
+func sanitizeToolChoiceForEncode(tc *ToolChoice, encodedToolNames map[string]bool, encodedToolCount int) *ToolChoice {
+	if tc == nil {
+		return nil
+	}
+	clone := *tc
+	if clone.Type == "tool" && clone.ToolName != "" {
+		if encodedToolCount == 0 || !encodedToolNames[clone.ToolName] {
+			clone.Type = "auto"
+			clone.ToolName = ""
+		}
+	}
+	if clone.Type == "" && len(clone.AllowedToolNames) == 0 {
+		return nil
+	}
+	return &clone
+}
+
+// nameSetFromIRTools returns the set of non-empty IR tool names, used by
+// sanitizeToolChoiceForEncode to detect dropped selectors.
+func nameSetFromIRTools(tools []Tool) map[string]bool {
+	if len(tools) == 0 {
+		return nil
+	}
+	names := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		if t.Name != "" {
+			names[t.Name] = true
+		}
+	}
+	return names
 }
 
 func isNonEmptyJSONArray(raw json.RawMessage) (bool, error) {

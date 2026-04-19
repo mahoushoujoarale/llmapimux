@@ -236,7 +236,6 @@ func DecodeOpenAIChatRequest(body []byte) (*Request, error) {
 	return req, nil
 }
 
-
 // decodeOpenAIChatToolChoice decodes the tool_choice field which can be a string or object.
 func decodeOpenAIChatToolChoice(raw json.RawMessage) (*ToolChoice, error) {
 	if len(raw) == 0 {
@@ -441,10 +440,18 @@ func EncodeOpenAIChatRequest(req *Request) ([]byte, error) {
 		raw.Messages = append(raw.Messages, msgs...)
 	}
 
-	// Tools
+	// Tools — OpenAI Chat Completions only supports function tools; Anthropic
+	// server-side tools (web_search, bash, computer, text_editor) have no chat
+	// representation and must be dropped before the request is sent. Forwarding
+	// them as type:"function" with no parameters used to reach the provider
+	// and produce a 400.
+	encodedToolNames := map[string]bool{}
 	if len(req.Tools) > 0 {
 		tools := make([]openaichat.ChatTool, 0, len(req.Tools))
 		for _, t := range req.Tools {
+			if !isOpenAIChatSupportedToolType(t.Type) {
+				continue
+			}
 			tools = append(tools, openaichat.ChatTool{
 				Type: "function",
 				Function: openaichat.ChatFunction{
@@ -454,17 +461,27 @@ func EncodeOpenAIChatRequest(req *Request) ([]byte, error) {
 					Strict:      t.Strict,
 				},
 			})
+			if t.Name != "" {
+				encodedToolNames[t.Name] = true
+			}
 		}
-		raw.Tools = tools
+		if len(tools) > 0 {
+			raw.Tools = tools
+		}
 	}
 
-	// Tool choice
+	// Tool choice — sanitize against the surviving tool set so a named
+	// selector pointing at a dropped Anthropic server tool degrades to auto
+	// instead of reproducing the original 400.
 	if req.ToolChoice != nil {
-		tc, err := encodeOpenAIChatToolChoice(req.ToolChoice)
-		if err != nil {
-			return nil, fmt.Errorf("encode openai chat request tool_choice: %w", err)
+		effective := sanitizeToolChoiceForEncode(req.ToolChoice, encodedToolNames, len(raw.Tools))
+		if effective != nil {
+			tc, err := encodeOpenAIChatToolChoice(effective)
+			if err != nil {
+				return nil, fmt.Errorf("encode openai chat request tool_choice: %w", err)
+			}
+			raw.ToolChoice = tc
 		}
-		raw.ToolChoice = tc
 
 		// AllowParallelCalls → parallel_tool_calls (top-level)
 		if req.ToolChoice.AllowParallelCalls != nil {
@@ -703,7 +720,6 @@ func encodeOpenAIChatToolChoice(tc *ToolChoice) (json.RawMessage, error) {
 		return json.Marshal(tc.Type)
 	}
 }
-
 
 // --- Response decode/encode ---
 
