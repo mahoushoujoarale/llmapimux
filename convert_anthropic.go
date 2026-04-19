@@ -56,13 +56,7 @@ type anthropicCitationWire struct {
 	DocumentIndex  *int   `json:"document_index,omitempty"`
 }
 
-
 // Content can be a string or an array of content blocks.
-
-
-
-
-
 
 // DecodeAnthropicRequest decodes an Anthropic Messages API JSON request body
 // into the unified IR Request type.
@@ -104,19 +98,22 @@ func DecodeAnthropicRequest(body []byte) (*Request, error) {
 		req.Messages = messages
 	}
 
-	// Tools — skip server (non-custom) tools
+	// Tools
 	if len(raw.Tools) > 0 {
 		tools := make([]Tool, 0, len(raw.Tools))
 		for _, t := range raw.Tools {
-			// Empty type or "custom" are custom tools; everything else is a server tool.
-			if t.Type != "" && t.Type != "custom" {
-				continue
-			}
-			tools = append(tools, Tool{
+			tool := Tool{
+				Type:        normalizeAnthropicToolType(t.Type),
 				Name:        t.Name,
 				Description: t.Description,
-				Parameters:  t.InputSchema,
-			})
+				ExtraFields: cloneRawMessageMap(t.ExtraFields),
+			}
+			if isFunctionToolType(tool.Type) {
+				tool.Parameters = t.InputSchema
+			} else if tool.Name == "" {
+				tool.Name = defaultToolNameForType(tool.Type)
+			}
+			tools = append(tools, tool)
 		}
 		if len(tools) > 0 {
 			req.Tools = tools
@@ -426,8 +423,6 @@ func encodeAnthropicCitations(citations []Citation) []json.RawMessage {
 	return result
 }
 
-
-
 // defaultAnthropicMaxTokens is the fallback max_tokens when the inbound request
 // did not specify one. Anthropic requires a positive value; use a conservative
 // default that works for all current Claude models.
@@ -475,12 +470,18 @@ func EncodeAnthropicRequest(req *Request) ([]byte, error) {
 	if len(req.Tools) > 0 {
 		tools := make([]anthropic.Tool, 0, len(req.Tools))
 		for _, t := range req.Tools {
-			tools = append(tools, anthropic.Tool{
+			tool := anthropic.Tool{
 				Name:        t.Name,
 				Description: t.Description,
-				InputSchema: t.Parameters,
-				Type:        "custom",
-			})
+				Type:        anthropicToolTypeFromIR(t.Type),
+				ExtraFields: cloneRawMessageMap(t.ExtraFields),
+			}
+			if isFunctionToolType(t.Type) {
+				tool.InputSchema = t.Parameters
+			} else if tool.Name == "" {
+				tool.Name = defaultToolNameForType(t.Type)
+			}
+			tools = append(tools, tool)
 		}
 		raw.Tools = tools
 	}

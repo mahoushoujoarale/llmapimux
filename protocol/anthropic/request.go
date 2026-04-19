@@ -4,18 +4,18 @@ import "encoding/json"
 
 // Request is the JSON structure of an Anthropic Messages API request.
 type Request struct {
-	Model         string         `json:"model"`
-	MaxTokens     int            `json:"max_tokens"`
-	System        []ContentBlock `json:"system"`
-	Messages      []Message      `json:"messages"`
-	Temperature   *float64       `json:"temperature"`
-	TopP          *float64       `json:"top_p"`
-	TopK          *int           `json:"top_k"`
-	StopSequences []string       `json:"stop_sequences"`
-	Stream        bool           `json:"stream"`
-	Tools         []Tool         `json:"tools"`
-	ToolChoice    *ToolChoice    `json:"tool_choice"`
-	Thinking      *Thinking      `json:"thinking"`
+	Model         string          `json:"model"`
+	MaxTokens     int             `json:"max_tokens"`
+	System        []ContentBlock  `json:"system"`
+	Messages      []Message       `json:"messages"`
+	Temperature   *float64        `json:"temperature"`
+	TopP          *float64        `json:"top_p"`
+	TopK          *int            `json:"top_k"`
+	StopSequences []string        `json:"stop_sequences"`
+	Stream        bool            `json:"stream"`
+	Tools         []Tool          `json:"tools"`
+	ToolChoice    *ToolChoice     `json:"tool_choice"`
+	Thinking      *Thinking       `json:"thinking"`
 	Metadata      json.RawMessage `json:"metadata,omitempty"`
 }
 
@@ -59,7 +59,7 @@ type ContentBlock struct {
 
 // Source represents the source of image or document content.
 type Source struct {
-	Type      string `json:"type"`                // "base64" or "url"
+	Type      string `json:"type"`                 // "base64" or "url"
 	MediaType string `json:"media_type,omitempty"` // e.g. "image/png"
 	Data      string `json:"data,omitempty"`       // base64-encoded data (when type=base64)
 	URL       string `json:"url,omitempty"`        // URL (when type=url)
@@ -71,7 +71,76 @@ type Tool struct {
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"input_schema"`
 	// Type can be "custom", "web_search_20250305", etc. Empty string means custom.
-	Type string `json:"type"`
+	Type        string                     `json:"type"`
+	ExtraFields map[string]json.RawMessage `json:"-"`
+}
+
+func (t Tool) MarshalJSON() ([]byte, error) {
+	raw := make(map[string]json.RawMessage, 4+len(t.ExtraFields))
+	if t.Name != "" {
+		b, err := json.Marshal(t.Name)
+		if err != nil {
+			return nil, err
+		}
+		raw["name"] = b
+	}
+	if t.Description != "" {
+		b, err := json.Marshal(t.Description)
+		if err != nil {
+			return nil, err
+		}
+		raw["description"] = b
+	}
+	if len(t.InputSchema) > 0 {
+		raw["input_schema"] = t.InputSchema
+	}
+	if t.Type != "" {
+		b, err := json.Marshal(t.Type)
+		if err != nil {
+			return nil, err
+		}
+		raw["type"] = b
+	}
+	for k, v := range t.ExtraFields {
+		raw[k] = v
+	}
+	return json.Marshal(raw)
+}
+
+func (t *Tool) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	if v, ok := raw["name"]; ok {
+		if err := json.Unmarshal(v, &t.Name); err != nil {
+			return err
+		}
+		delete(raw, "name")
+	}
+	if v, ok := raw["description"]; ok {
+		if err := json.Unmarshal(v, &t.Description); err != nil {
+			return err
+		}
+		delete(raw, "description")
+	}
+	if v, ok := raw["input_schema"]; ok {
+		t.InputSchema = v
+		delete(raw, "input_schema")
+	}
+	if v, ok := raw["type"]; ok {
+		if err := json.Unmarshal(v, &t.Type); err != nil {
+			return err
+		}
+		delete(raw, "type")
+	}
+	if len(raw) > 0 {
+		t.ExtraFields = raw
+	} else {
+		t.ExtraFields = nil
+	}
+	return nil
 }
 
 // ToolChoice represents the tool_choice field in the Anthropic API.

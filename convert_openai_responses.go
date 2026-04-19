@@ -50,7 +50,6 @@ func derefIntPtr(p *int) int {
 	return *p
 }
 
-
 // --- Decode functions ---
 
 // DecodeOpenAIResponsesRequest decodes an OpenAI Responses API JSON request body
@@ -105,19 +104,22 @@ func DecodeOpenAIResponsesRequest(body []byte) (*Request, error) {
 		req.SystemPrompt = systemParts
 	}
 
-	// Tools — keep only function tools, silently drop built-in tools
+	// Tools
 	if len(raw.Tools) > 0 {
 		tools := make([]Tool, 0, len(raw.Tools))
 		for _, t := range raw.Tools {
-			if t.Type != "function" {
-				continue
-			}
-			tools = append(tools, Tool{
+			tool := Tool{
+				Type:        normalizeOpenAIResponsesToolType(t.Type),
 				Name:        t.Name,
 				Description: t.Description,
 				Parameters:  t.Parameters,
 				Strict:      t.Strict,
-			})
+				ExtraFields: cloneRawMessageMap(t.ExtraFields),
+			}
+			if !isFunctionToolType(tool.Type) && tool.Name == "" {
+				tool.Name = defaultToolNameForType(tool.Type)
+			}
+			tools = append(tools, tool)
 		}
 		if len(tools) > 0 {
 			req.Tools = tools
@@ -126,7 +128,7 @@ func DecodeOpenAIResponsesRequest(body []byte) (*Request, error) {
 
 	// Tool choice
 	if len(raw.ToolChoice) > 0 {
-		tc, err := decodeOaiRespToolChoice(raw.ToolChoice)
+		tc, err := decodeOaiRespToolChoice(raw.ToolChoice, req.Tools)
 		if err != nil {
 			return nil, fmt.Errorf("decode openai responses request tool_choice: %w", err)
 		}
@@ -163,9 +165,8 @@ func DecodeOpenAIResponsesRequest(body []byte) (*Request, error) {
 	return req, nil
 }
 
-
 // decodeOaiRespToolChoice decodes the tool_choice field which can be a string or object.
-func decodeOaiRespToolChoice(raw json.RawMessage) (*ToolChoice, error) {
+func decodeOaiRespToolChoice(raw json.RawMessage, tools []Tool) (*ToolChoice, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
@@ -176,15 +177,71 @@ func decodeOaiRespToolChoice(raw json.RawMessage) (*ToolChoice, error) {
 		}
 		return &ToolChoice{Type: s}, nil
 	}
-	var obj openairesponses.ToolChoiceObj
+	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, err
 	}
-	tc := &ToolChoice{Type: "tool"}
-	if obj.Name != "" {
-		tc.ToolName = obj.Name
+
+	var kind string
+	if err := json.Unmarshal(obj["type"], &kind); err != nil {
+		return nil, err
 	}
-	return tc, nil
+	switch kind {
+	case "function":
+		tc := &ToolChoice{Type: "tool"}
+		if nameRaw, ok := obj["name"]; ok {
+			if err := json.Unmarshal(nameRaw, &tc.ToolName); err != nil {
+				return nil, err
+			}
+		}
+		return tc, nil
+	case "allowed_tools":
+		tc := &ToolChoice{}
+		if modeRaw, ok := obj["mode"]; ok {
+			if err := json.Unmarshal(modeRaw, &tc.Type); err != nil {
+				return nil, err
+			}
+		}
+		if toolsRaw, ok := obj["tools"]; ok {
+			var allowed []map[string]json.RawMessage
+			if err := json.Unmarshal(toolsRaw, &allowed); err != nil {
+				return nil, err
+			}
+			for _, tool := range allowed {
+				var toolType string
+				if err := json.Unmarshal(tool["type"], &toolType); err != nil {
+					return nil, err
+				}
+				if normalizeOpenAIResponsesToolType(toolType) != "function" {
+					continue
+				}
+				if nameRaw, ok := tool["name"]; ok {
+					var name string
+					if err := json.Unmarshal(nameRaw, &name); err != nil {
+						return nil, err
+					}
+					if name != "" {
+						tc.AllowedToolNames = append(tc.AllowedToolNames, name)
+					}
+				}
+			}
+		}
+		if tc.Type == "" {
+			tc.Type = "auto"
+		}
+		return tc, nil
+	case "auto", "none", "required":
+		return &ToolChoice{Type: kind}, nil
+	default:
+		tc := &ToolChoice{Type: "tool"}
+		normalized := normalizeOpenAIResponsesToolType(kind)
+		if tool := findToolByType(tools, normalized); tool != nil && tool.Name != "" {
+			tc.ToolName = tool.Name
+		} else {
+			tc.ToolName = defaultToolNameForType(normalized)
+		}
+		return tc, nil
+	}
 }
 
 // decodeOaiRespInput decodes the input field which can be a string or array of items.
@@ -444,20 +501,24 @@ func EncodeOpenAIResponsesRequest(req *Request) ([]byte, error) {
 	if len(req.Tools) > 0 {
 		tools := make([]openairesponses.Tool, 0, len(req.Tools))
 		for _, t := range req.Tools {
-			tools = append(tools, openairesponses.Tool{
-				Type:        "function",
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  t.Parameters,
-				Strict:      t.Strict,
-			})
+			tool := openairesponses.Tool{
+				Type:        openAIResponsesToolTypeFromIR(t.Type),
+				ExtraFields: cloneRawMessageMap(t.ExtraFields),
+			}
+			if isFunctionToolType(t.Type) {
+				tool.Name = t.Name
+				tool.Description = t.Description
+				tool.Parameters = t.Parameters
+				tool.Strict = t.Strict
+			}
+			tools = append(tools, tool)
 		}
 		raw.Tools = tools
 	}
 
 	// Tool choice
 	if req.ToolChoice != nil {
-		tc, err := encodeOaiRespToolChoice(req.ToolChoice)
+		tc, err := encodeOaiRespToolChoice(req)
 		if err != nil {
 			return nil, fmt.Errorf("encode openai responses request tool_choice: %w", err)
 		}
@@ -635,19 +696,55 @@ func encodeOaiRespContentParts(parts []ContentPart, textType string) []openaires
 // Returns nil, nil when tc.Type is empty (e.g. ToolChoice was created only to carry
 // AllowParallelCalls with no tool_choice type set). The caller must not emit tool_choice
 // in that case; parallel_tool_calls is already emitted separately as a top-level field.
-func encodeOaiRespToolChoice(tc *ToolChoice) (json.RawMessage, error) {
+func encodeOaiRespToolChoice(req *Request) (json.RawMessage, error) {
+	tc := req.ToolChoice
+	if tc == nil {
+		return nil, nil
+	}
+	if len(tc.AllowedToolNames) > 0 {
+		allowedTools := selectToolsByName(req.Tools, tc.AllowedToolNames)
+		if len(allowedTools) == 0 {
+			return nil, fmt.Errorf("encode allowed_tools: no allowed tools matched request tools")
+		}
+		mode := tc.Type
+		if mode == "" || mode == "tool" {
+			mode = "required"
+		}
+		payload := map[string]any{
+			"type":  "allowed_tools",
+			"mode":  mode,
+			"tools": make([]map[string]any, 0, len(allowedTools)),
+		}
+		for _, tool := range allowedTools {
+			selector := map[string]any{
+				"type": openAIResponsesToolTypeFromIR(tool.Type),
+			}
+			if isFunctionToolType(tool.Type) {
+				selector["name"] = tool.Name
+			}
+			payload["tools"] = append(payload["tools"].([]map[string]any), selector)
+		}
+		return json.Marshal(payload)
+	}
 	switch tc.Type {
 	case "":
 		return nil, nil
 	case "auto", "none", "required":
 		return json.Marshal(tc.Type)
 	case "tool":
-		obj := openairesponses.ToolChoiceObj{
-			Type: "function",
-			Name: tc.ToolName,
+		if tool := findToolByName(req.Tools, tc.ToolName); tool != nil && !isFunctionToolType(tool.Type) {
+			return json.Marshal(map[string]string{
+				"type": openAIResponsesToolTypeFromIR(tool.Type),
+			})
 		}
+		obj := openairesponses.ToolChoiceObj{Type: "function", Name: tc.ToolName}
 		return json.Marshal(obj)
 	default:
+		if !isFunctionToolType(tc.Type) {
+			return json.Marshal(map[string]string{
+				"type": openAIResponsesToolTypeFromIR(tc.Type),
+			})
+		}
 		return json.Marshal(tc.Type)
 	}
 }

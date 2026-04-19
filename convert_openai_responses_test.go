@@ -246,18 +246,26 @@ func TestDecodeOpenAIResponsesRequest_Tools(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Only function tools kept, built-in tools dropped
-	if len(req.Tools) != 1 {
-		t.Fatalf("Tools len = %d, want 1", len(req.Tools))
+	if len(req.Tools) != 6 {
+		t.Fatalf("Tools len = %d, want 6", len(req.Tools))
 	}
 	if req.Tools[0].Name != "read_file" {
 		t.Errorf("Tools[0].Name = %q, want %q", req.Tools[0].Name, "read_file")
+	}
+	if req.Tools[0].Type != "function" {
+		t.Errorf("Tools[0].Type = %q, want function", req.Tools[0].Type)
 	}
 	if req.Tools[0].Description != "Read a file" {
 		t.Errorf("Tools[0].Description = %q, want %q", req.Tools[0].Description, "Read a file")
 	}
 	if !req.Tools[0].Strict {
 		t.Error("Tools[0].Strict = false, want true")
+	}
+	wantTypes := []string{"function", "file_search", "web_search", "code_interpreter", "computer_use", "mcp"}
+	for i, want := range wantTypes {
+		if req.Tools[i].Type != want {
+			t.Errorf("Tools[%d].Type = %q, want %q", i, req.Tools[i].Type, want)
+		}
 	}
 
 	// Tool choice
@@ -290,6 +298,76 @@ func TestDecodeOpenAIResponsesRequest_ToolChoiceObject(t *testing.T) {
 	}
 	if req.ToolChoice.ToolName != "read_file" {
 		t.Errorf("ToolChoice.ToolName = %q, want %q", req.ToolChoice.ToolName, "read_file")
+	}
+}
+
+func TestDecodeOpenAIResponsesRequest_BuiltInToolChoiceObject(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-4o",
+		"input": "Hello",
+		"tools": [{"type": "web_search"}],
+		"tool_choice": {"type": "web_search"}
+	}`)
+
+	req, err := DecodeOpenAIResponsesRequest(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(req.Tools) != 1 {
+		t.Fatalf("Tools len = %d, want 1", len(req.Tools))
+	}
+	if req.Tools[0].Type != "web_search" {
+		t.Errorf("Tools[0].Type = %q, want web_search", req.Tools[0].Type)
+	}
+	if req.ToolChoice == nil {
+		t.Fatal("ToolChoice is nil")
+	}
+	if req.ToolChoice.Type != "tool" {
+		t.Errorf("ToolChoice.Type = %q, want tool", req.ToolChoice.Type)
+	}
+	if req.ToolChoice.ToolName != "web_search" {
+		t.Errorf("ToolChoice.ToolName = %q, want web_search", req.ToolChoice.ToolName)
+	}
+}
+
+func TestDecodeOpenAIResponsesRequest_AllowedTools(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-4o",
+		"input": "Hello",
+		"tools": [
+			{"type": "function", "name": "read_file", "parameters": {}},
+			{"type": "function", "name": "write_file", "parameters": {}}
+		],
+		"tool_choice": {
+			"type": "allowed_tools",
+			"mode": "required",
+			"tools": [
+				{"type": "function", "name": "read_file"},
+				{"type": "function", "name": "write_file"}
+			]
+		}
+	}`)
+
+	req, err := DecodeOpenAIResponsesRequest(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if req.ToolChoice == nil {
+		t.Fatal("ToolChoice is nil")
+	}
+	if req.ToolChoice.Type != "required" {
+		t.Errorf("ToolChoice.Type = %q, want required", req.ToolChoice.Type)
+	}
+	if len(req.ToolChoice.AllowedToolNames) != 2 {
+		t.Fatalf("AllowedToolNames len = %d, want 2", len(req.ToolChoice.AllowedToolNames))
+	}
+	if req.ToolChoice.AllowedToolNames[0] != "read_file" {
+		t.Errorf("AllowedToolNames[0] = %q, want read_file", req.ToolChoice.AllowedToolNames[0])
+	}
+	if req.ToolChoice.AllowedToolNames[1] != "write_file" {
+		t.Errorf("AllowedToolNames[1] = %q, want write_file", req.ToolChoice.AllowedToolNames[1])
 	}
 }
 
@@ -690,6 +768,87 @@ func TestEncodeOpenAIResponsesRequest_ToolChoiceObject(t *testing.T) {
 	}
 	if tc["name"] != "read_file" {
 		t.Errorf("tool_choice.name = %q, want %q", tc["name"], "read_file")
+	}
+}
+
+func TestEncodeOpenAIResponsesRequest_BuiltInToolChoiceObject(t *testing.T) {
+	req := &Request{
+		Model: "gpt-4o",
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}}}},
+		},
+		Tools: []Tool{
+			{Type: "web_search", Name: "web_search"},
+		},
+		ToolChoice: &ToolChoice{Type: "tool", ToolName: "web_search"},
+	}
+
+	data, err := EncodeOpenAIResponsesRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	json.Unmarshal(data, &raw)
+
+	var tc map[string]string
+	json.Unmarshal(raw["tool_choice"], &tc)
+	if tc["type"] != "web_search" {
+		t.Errorf("tool_choice.type = %q, want web_search", tc["type"])
+	}
+}
+
+func TestEncodeOpenAIResponsesRequest_AllowedTools(t *testing.T) {
+	req := &Request{
+		Model: "gpt-4o",
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}}}},
+		},
+		Tools: []Tool{
+			{Name: "read_file", Parameters: json.RawMessage(`{"type":"object"}`)},
+			{Name: "write_file", Parameters: json.RawMessage(`{"type":"object"}`)},
+		},
+		ToolChoice: &ToolChoice{
+			Type:             "required",
+			AllowedToolNames: []string{"read_file", "write_file"},
+		},
+	}
+
+	data, err := EncodeOpenAIResponsesRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	json.Unmarshal(data, &raw)
+
+	var tc map[string]json.RawMessage
+	if err := json.Unmarshal(raw["tool_choice"], &tc); err != nil {
+		t.Fatalf("unmarshal tool_choice: %v", err)
+	}
+
+	var tcType string
+	if err := json.Unmarshal(tc["type"], &tcType); err != nil {
+		t.Fatalf("unmarshal tool_choice.type: %v", err)
+	}
+	if tcType != "allowed_tools" {
+		t.Errorf("tool_choice.type = %q, want allowed_tools", tcType)
+	}
+
+	var mode string
+	if err := json.Unmarshal(tc["mode"], &mode); err != nil {
+		t.Fatalf("unmarshal tool_choice.mode: %v", err)
+	}
+	if mode != "required" {
+		t.Errorf("tool_choice.mode = %q, want required", mode)
+	}
+
+	var allowedTools []map[string]json.RawMessage
+	if err := json.Unmarshal(tc["tools"], &allowedTools); err != nil {
+		t.Fatalf("unmarshal tool_choice.tools: %v", err)
+	}
+	if len(allowedTools) != 2 {
+		t.Fatalf("tool_choice.tools len = %d, want 2", len(allowedTools))
 	}
 }
 

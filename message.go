@@ -132,18 +132,20 @@ type Message struct {
 
 // Tool describes a tool available to the model.
 type Tool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
-	Strict      bool            `json:"strict,omitempty"`
+	Type        string                     `json:"type,omitempty"`
+	Name        string                     `json:"name"`
+	Description string                     `json:"description,omitempty"`
+	Parameters  json.RawMessage            `json:"parameters,omitempty"`
+	Strict      bool                       `json:"strict,omitempty"`
+	ExtraFields map[string]json.RawMessage `json:"extra_fields,omitempty"`
 }
 
 // ToolChoice controls how the model selects tools.
 type ToolChoice struct {
-	Type              string   `json:"type"`
-	ToolName          string   `json:"tool_name,omitempty"`
-	AllowedToolNames  []string `json:"allowed_tool_names,omitempty"`
-	AllowParallelCalls *bool   `json:"allow_parallel_calls,omitempty"`
+	Type               string   `json:"type"`
+	ToolName           string   `json:"tool_name,omitempty"`
+	AllowedToolNames   []string `json:"allowed_tool_names,omitempty"`
+	AllowParallelCalls *bool    `json:"allow_parallel_calls,omitempty"`
 }
 
 // ProviderExtensions holds provider-specific extension fields as raw JSON values,
@@ -153,11 +155,11 @@ type ProviderExtensions map[string]json.RawMessage
 
 // ThinkingConfig controls extended thinking behavior.
 type ThinkingConfig struct {
-	Mode             string `json:"mode,omitempty"`
-	BudgetTokens     int    `json:"budget_tokens,omitempty"`
-	Effort           string `json:"effort,omitempty"`
-	IncludeThoughts  *bool  `json:"include_thoughts,omitempty"`
-	Level            string `json:"level,omitempty"`
+	Mode            string `json:"mode,omitempty"`
+	BudgetTokens    int    `json:"budget_tokens,omitempty"`
+	Effort          string `json:"effort,omitempty"`
+	IncludeThoughts *bool  `json:"include_thoughts,omitempty"`
+	Level           string `json:"level,omitempty"`
 }
 
 // ResponseFormat controls the output format of the model.
@@ -188,11 +190,11 @@ type Request struct {
 	ProviderExtensions ProviderExtensions `json:"provider_extensions,omitempty"`
 	// Protocol-specific fields preserved for same-protocol roundtrip.
 	// Managed internally by the library — do not modify.
-	RawExtra      map[string]json.RawMessage `json:"-"`
+	RawExtra map[string]json.RawMessage `json:"-"`
 	// Extra fields to merge into the outbound request body.
 	// Set by RequestModifier before each send attempt.
-	OutboundExtra map[string]json.RawMessage `json:"-"`
-	InboundProtocol Protocol                 `json:"-"`
+	OutboundExtra   map[string]json.RawMessage `json:"-"`
+	InboundProtocol Protocol                   `json:"-"`
 }
 
 // Response is the unified intermediate representation of an LLM API response.

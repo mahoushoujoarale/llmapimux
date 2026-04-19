@@ -104,19 +104,29 @@ func TestDecodeAnthropicRequest_Tools(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Only the custom tool should be included
-	if len(req.Tools) != 1 {
-		t.Fatalf("Tools len = %d, want 1 (server tool skipped)", len(req.Tools))
+	if len(req.Tools) != 2 {
+		t.Fatalf("Tools len = %d, want 2", len(req.Tools))
 	}
-	tool := req.Tools[0]
-	if tool.Name != "read_file" {
-		t.Errorf("Tools[0].Name = %q, want %q", tool.Name, "read_file")
+	customTool := req.Tools[0]
+	if customTool.Type != "function" {
+		t.Errorf("Tools[0].Type = %q, want function", customTool.Type)
 	}
-	if tool.Description != "Read a file" {
-		t.Errorf("Tools[0].Description = %q, want %q", tool.Description, "Read a file")
+	if customTool.Name != "read_file" {
+		t.Errorf("Tools[0].Name = %q, want %q", customTool.Name, "read_file")
 	}
-	if tool.Parameters == nil {
+	if customTool.Description != "Read a file" {
+		t.Errorf("Tools[0].Description = %q, want %q", customTool.Description, "Read a file")
+	}
+	if customTool.Parameters == nil {
 		t.Error("Tools[0].Parameters is nil")
+	}
+
+	serverTool := req.Tools[1]
+	if serverTool.Type != "web_search" {
+		t.Errorf("Tools[1].Type = %q, want web_search", serverTool.Type)
+	}
+	if serverTool.Name != "web_search" {
+		t.Errorf("Tools[1].Name = %q, want web_search", serverTool.Name)
 	}
 
 	if req.ToolChoice == nil {

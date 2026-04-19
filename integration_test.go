@@ -203,6 +203,117 @@ func TestIntegration_OpenAIResponses_To_Anthropic(t *testing.T) {
 	}
 }
 
+func TestIntegration_AnthropicToOpenAIResponses_PreservesBuiltInWebSearch(t *testing.T) {
+	var gotBody map[string]json.RawMessage
+	openaiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp_1",
+			"model":"gpt-5",
+			"status":"completed",
+			"output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],
+			"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}
+		}`))
+	}))
+	defer openaiServer.Close()
+
+	mux := NewMux(&staticRouter{result: RouteResult{
+		Protocol: ProtocolOpenAIResponses,
+		BaseURL:  openaiServer.URL,
+		APIKey:   "sk-openai",
+		Model:    "gpt-5",
+	}})
+
+	reqBody := `{
+		"model":"claude-sonnet-4-20250514",
+		"max_tokens":256,
+		"messages":[{"role":"user","content":[{"type":"text","text":"Search for qwer1234"}]}],
+		"tools":[
+			{
+				"name":"web_search",
+				"type":"web_search_20250305",
+				"allowed_domains":["openai.com"],
+				"blocked_domains":["example.com"],
+				"max_uses":3
+			}
+		],
+		"tool_choice":{"type":"tool","name":"web_search"}
+	}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	mux.AnthropicHandler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	toolsRaw, ok := gotBody["tools"]
+	if !ok {
+		t.Fatal("tools missing from outbound OpenAI Responses request")
+	}
+	var tools []map[string]json.RawMessage
+	if err := json.Unmarshal(toolsRaw, &tools); err != nil {
+		t.Fatalf("unmarshal tools: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tools len = %d, want 1", len(tools))
+	}
+
+	var toolType string
+	if err := json.Unmarshal(tools[0]["type"], &toolType); err != nil {
+		t.Fatalf("unmarshal tools[0].type: %v", err)
+	}
+	if toolType != "web_search" {
+		t.Errorf("tools[0].type = %q, want web_search", toolType)
+	}
+
+	var allowedDomains []string
+	if err := json.Unmarshal(tools[0]["allowed_domains"], &allowedDomains); err != nil {
+		t.Fatalf("unmarshal tools[0].allowed_domains: %v", err)
+	}
+	if len(allowedDomains) != 1 || allowedDomains[0] != "openai.com" {
+		t.Errorf("tools[0].allowed_domains = %v, want [openai.com]", allowedDomains)
+	}
+
+	var blockedDomains []string
+	if err := json.Unmarshal(tools[0]["blocked_domains"], &blockedDomains); err != nil {
+		t.Fatalf("unmarshal tools[0].blocked_domains: %v", err)
+	}
+	if len(blockedDomains) != 1 || blockedDomains[0] != "example.com" {
+		t.Errorf("tools[0].blocked_domains = %v, want [example.com]", blockedDomains)
+	}
+
+	var maxUses int
+	if err := json.Unmarshal(tools[0]["max_uses"], &maxUses); err != nil {
+		t.Fatalf("unmarshal tools[0].max_uses: %v", err)
+	}
+	if maxUses != 3 {
+		t.Errorf("tools[0].max_uses = %d, want 3", maxUses)
+	}
+
+	tcRaw, ok := gotBody["tool_choice"]
+	if !ok {
+		t.Fatal("tool_choice missing from outbound OpenAI Responses request")
+	}
+	var tc map[string]json.RawMessage
+	if err := json.Unmarshal(tcRaw, &tc); err != nil {
+		t.Fatalf("unmarshal tool_choice: %v", err)
+	}
+
+	var tcType string
+	if err := json.Unmarshal(tc["type"], &tcType); err != nil {
+		t.Fatalf("unmarshal tool_choice.type: %v", err)
+	}
+	if tcType != "web_search" {
+		t.Errorf("tool_choice.type = %q, want web_search", tcType)
+	}
+}
+
 // TestIntegration_Gemini_To_OpenAIChat tests:
 // Gemini inbound request → IR decode → OpenAI Chat outbound → IR encode → Gemini response.
 func TestIntegration_Gemini_To_OpenAIChat(t *testing.T) {
@@ -263,6 +374,201 @@ func TestIntegration_Gemini_To_OpenAIChat(t *testing.T) {
 	part, _ := parts[0].(map[string]any)
 	if part["text"] != "Hello from OpenAI!" {
 		t.Errorf("parts[0].text = %v, want Hello from OpenAI!", part["text"])
+	}
+}
+
+func TestIntegration_GeminiToOpenAIResponses_AllowedToolNamesSingleUsesAllowedTools(t *testing.T) {
+	var gotBody map[string]json.RawMessage
+	openaiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp_1",
+			"model":"gpt-5",
+			"status":"completed",
+			"output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],
+			"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}
+		}`))
+	}))
+	defer openaiServer.Close()
+
+	mux := NewMux(&staticRouter{result: RouteResult{
+		Protocol: ProtocolOpenAIResponses,
+		BaseURL:  openaiServer.URL,
+		APIKey:   "sk-openai",
+		Model:    "gpt-5",
+	}})
+
+	reqBody := `{
+		"contents":[{"role":"user","parts":[{"text":"Use exactly one tool"}]}],
+		"tools":[{"functionDeclarations":[{"name":"my_tool","description":"A tool"}]}],
+		"toolConfig":{
+			"functionCallingConfig":{
+				"mode":"ANY",
+				"allowedFunctionNames":["my_tool"]
+			}
+		}
+	}`
+	req := httptest.NewRequest("POST", "/v1/models/gemini-2.5-pro:generateContent", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	mux.GeminiHandler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	tcRaw, ok := gotBody["tool_choice"]
+	if !ok {
+		t.Fatal("tool_choice missing from outbound OpenAI Responses request")
+	}
+	var tc map[string]json.RawMessage
+	if err := json.Unmarshal(tcRaw, &tc); err != nil {
+		t.Fatalf("unmarshal tool_choice: %v", err)
+	}
+
+	var tcType string
+	if err := json.Unmarshal(tc["type"], &tcType); err != nil {
+		t.Fatalf("unmarshal tool_choice.type: %v", err)
+	}
+	if tcType != "allowed_tools" {
+		t.Fatalf("tool_choice.type = %q, want allowed_tools", tcType)
+	}
+
+	var mode string
+	if err := json.Unmarshal(tc["mode"], &mode); err != nil {
+		t.Fatalf("unmarshal tool_choice.mode: %v", err)
+	}
+	if mode != "required" {
+		t.Errorf("tool_choice.mode = %q, want required", mode)
+	}
+
+	var allowedTools []map[string]json.RawMessage
+	if err := json.Unmarshal(tc["tools"], &allowedTools); err != nil {
+		t.Fatalf("unmarshal tool_choice.tools: %v", err)
+	}
+	if len(allowedTools) != 1 {
+		t.Fatalf("tool_choice.tools len = %d, want 1", len(allowedTools))
+	}
+
+	var allowedType string
+	if err := json.Unmarshal(allowedTools[0]["type"], &allowedType); err != nil {
+		t.Fatalf("unmarshal tool_choice.tools[0].type: %v", err)
+	}
+	if allowedType != "function" {
+		t.Errorf("tool_choice.tools[0].type = %q, want function", allowedType)
+	}
+
+	var allowedName string
+	if err := json.Unmarshal(allowedTools[0]["name"], &allowedName); err != nil {
+		t.Fatalf("unmarshal tool_choice.tools[0].name: %v", err)
+	}
+	if allowedName != "my_tool" {
+		t.Errorf("tool_choice.tools[0].name = %q, want my_tool", allowedName)
+	}
+}
+
+func TestIntegration_GeminiToOpenAIResponses_AllowedToolNamesMultiUsesAllowedTools(t *testing.T) {
+	var gotBody map[string]json.RawMessage
+	openaiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp_1",
+			"model":"gpt-5",
+			"status":"completed",
+			"output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],
+			"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}
+		}`))
+	}))
+	defer openaiServer.Close()
+
+	mux := NewMux(&staticRouter{result: RouteResult{
+		Protocol: ProtocolOpenAIResponses,
+		BaseURL:  openaiServer.URL,
+		APIKey:   "sk-openai",
+		Model:    "gpt-5",
+	}})
+
+	reqBody := `{
+		"contents":[{"role":"user","parts":[{"text":"Use one of the allowed tools"}]}],
+		"tools":[{"functionDeclarations":[
+			{"name":"tool_a","description":"Tool A"},
+			{"name":"tool_b","description":"Tool B"}
+		]}],
+		"toolConfig":{
+			"functionCallingConfig":{
+				"mode":"ANY",
+				"allowedFunctionNames":["tool_a","tool_b"]
+			}
+		}
+	}`
+	req := httptest.NewRequest("POST", "/v1/models/gemini-2.5-pro:generateContent", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	mux.GeminiHandler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	tcRaw, ok := gotBody["tool_choice"]
+	if !ok {
+		t.Fatal("tool_choice missing from outbound OpenAI Responses request")
+	}
+	var tc map[string]json.RawMessage
+	if err := json.Unmarshal(tcRaw, &tc); err != nil {
+		t.Fatalf("unmarshal tool_choice: %v", err)
+	}
+
+	var tcType string
+	if err := json.Unmarshal(tc["type"], &tcType); err != nil {
+		t.Fatalf("unmarshal tool_choice.type: %v", err)
+	}
+	if tcType != "allowed_tools" {
+		t.Fatalf("tool_choice.type = %q, want allowed_tools", tcType)
+	}
+
+	var mode string
+	if err := json.Unmarshal(tc["mode"], &mode); err != nil {
+		t.Fatalf("unmarshal tool_choice.mode: %v", err)
+	}
+	if mode != "required" {
+		t.Errorf("tool_choice.mode = %q, want required", mode)
+	}
+
+	var allowedTools []map[string]json.RawMessage
+	if err := json.Unmarshal(tc["tools"], &allowedTools); err != nil {
+		t.Fatalf("unmarshal tool_choice.tools: %v", err)
+	}
+	if len(allowedTools) != 2 {
+		t.Fatalf("tool_choice.tools len = %d, want 2", len(allowedTools))
+	}
+
+	var names []string
+	for i, tool := range allowedTools {
+		var toolType string
+		if err := json.Unmarshal(tool["type"], &toolType); err != nil {
+			t.Fatalf("unmarshal tool_choice.tools[%d].type: %v", i, err)
+		}
+		if toolType != "function" {
+			t.Errorf("tool_choice.tools[%d].type = %q, want function", i, toolType)
+		}
+
+		var name string
+		if err := json.Unmarshal(tool["name"], &name); err != nil {
+			t.Fatalf("unmarshal tool_choice.tools[%d].name: %v", i, err)
+		}
+		names = append(names, name)
+	}
+	if strings.Join(names, ",") != "tool_a,tool_b" {
+		t.Errorf("tool_choice.tools names = %v, want [tool_a tool_b]", names)
 	}
 }
 
