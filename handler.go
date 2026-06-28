@@ -13,11 +13,12 @@ import (
 // Handler is a unified http.Handler that delegates protocol-specific behavior
 // to an inboundCodec and routing decisions to a Router.
 type Handler struct {
-	codec  inboundCodec
-	router Router
-	auth   Authenticator  // nil = no auth
-	stats  StatsReporter
-	reqMod RequestModifier // nil = no modification
+	codec             inboundCodec
+	router            Router
+	auth              Authenticator // nil = no auth
+	stats             StatsReporter
+	reqMod            RequestModifier // nil = no modification
+	attemptController AttemptController
 }
 
 // buildSendError constructs a SendError from the error returned by Send/SendStream.
@@ -70,6 +71,9 @@ type retryLoopState struct {
 	stats      StatsReporter
 	target     RouteResult
 	attemptNum int
+
+	totalRetryAttempts int
+	totalQueueWait     time.Duration
 }
 
 // writeErrorAndComplete writes an error response to the client and fires OnComplete.
@@ -90,15 +94,80 @@ func (s *retryLoopState) writeErrorAndComplete(statusCode int, msg string, compE
 		OutputThroughput: 0,
 		IRResponse:       nil,
 		AttemptNum:       s.attemptNum,
+		RetryAttempts:    s.totalRetryAttempts,
+		QueueWait:        s.totalQueueWait,
 	})
 }
 
-// handleSendError processes a send error from either the streaming or non-streaming path.
-// It fires OnAttemptError, calls Router.OnError, and returns (nextTarget, true) if the
+func (s *retryLoopState) acquireAttempt(retryAttempt int) (AttemptAdmission, error) {
+	if s.h.attemptController == nil {
+		return AttemptAdmission{}, nil
+	}
+	admission, err := s.h.attemptController.Acquire(s.r.Context(), s.info, s.target, s.attemptNum, retryAttempt)
+	if admission.WaitDuration > 0 {
+		s.totalQueueWait += admission.WaitDuration
+	}
+	return admission, err
+}
+
+func releaseAttempt(admission AttemptAdmission) {
+	if admission.Permit != nil {
+		admission.Permit.Release()
+	}
+}
+
+func (s *retryLoopState) recordAttemptError(builtErr SendError, retryAttempt int, willRetry bool, retryDelay time.Duration) {
+	s.stats.OnAttemptError(s.r.Context(), AttemptErrorEvent{
+		RequestID:    s.info.RequestID,
+		AttemptNum:   s.attemptNum,
+		RetryAttempt: retryAttempt,
+		Target:       s.target,
+		SendErr:      builtErr,
+		WillRetry:    willRetry,
+		RetryDelay:   retryDelay,
+	})
+}
+
+func (s *retryLoopState) shouldRetry(builtErr SendError, retryAttempt int) (time.Duration, bool) {
+	if s.h.attemptController == nil {
+		return 0, false
+	}
+	return s.h.attemptController.RetryDelay(s.r.Context(), s.info, s.target, builtErr, s.attemptNum, retryAttempt)
+}
+
+func (s *retryLoopState) sleepBeforeRetry(delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-s.r.Context().Done():
+		s.writeErrorAndComplete(499, "context canceled", s.r.Context().Err())
+		return false
+	}
+}
+
+func (s *retryLoopState) writeAcquireErrorAndComplete(err error) {
+	statusCode := http.StatusServiceUnavailable
+	msg := "attempt controller error: " + err.Error()
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		statusCode = 499
+		msg = "context canceled"
+	}
+	s.writeErrorAndComplete(statusCode, msg, err)
+}
+
+// handleTerminalSendError processes a send error from either the streaming or
+// non-streaming path after same-target retries have been exhausted. It calls
+// Router.OnError and returns (nextTarget, true) if the
 // caller should continue to the next attempt, or (zero, false) if it should return after
 // writing the error response. The errPrefix is used for the user-facing error message.
 // If sendErr is nil (client == nil case), it creates a synthetic error.
-func (s *retryLoopState) handleSendError(sendErr error, errPrefix string) (RouteResult, bool) {
+func (s *retryLoopState) handleTerminalSendError(sendErr error, builtErr SendError, errPrefix string) (RouteResult, bool) {
 	// Check context cancellation — do not retry.
 	if s.r.Context().Err() != nil {
 		statusCode := 499
@@ -112,14 +181,6 @@ func (s *retryLoopState) handleSendError(sendErr error, errPrefix string) (Route
 		s.writeErrorAndComplete(statusCode, msg, s.r.Context().Err())
 		return RouteResult{}, false
 	}
-
-	builtErr := buildSendError(sendErr, s.attemptNum)
-	s.stats.OnAttemptError(s.r.Context(), AttemptErrorEvent{
-		RequestID:  s.info.RequestID,
-		AttemptNum: s.attemptNum,
-		Target:     s.target,
-		SendErr:    builtErr,
-	})
 
 	nextTarget, retryErr := s.h.router.OnError(s.r.Context(), s.info, s.target, builtErr)
 	if retryErr != nil {
@@ -144,6 +205,36 @@ func (s *retryLoopState) handleSendError(sendErr error, errPrefix string) (Route
 		s.req.RawExtra = nil
 	}
 	return nextTarget, true
+}
+
+func (s *retryLoopState) handleSendError(sendErr error, errPrefix string, retryAttempt int) (retrySameTarget bool, continueFallback bool) {
+	// Check context cancellation before asking the controller for retry advice.
+	if s.r.Context().Err() != nil {
+		statusCode := 499
+		if sendErr != nil {
+			statusCode = resolveUpstreamStatusCode(sendErr)
+		}
+		msg := "context canceled"
+		if sendErr != nil {
+			msg = errPrefix + sendErr.Error()
+		}
+		s.writeErrorAndComplete(statusCode, msg, s.r.Context().Err())
+		return false, false
+	}
+
+	builtErr := buildSendError(sendErr, s.attemptNum)
+	if retryDelay, ok := s.shouldRetry(builtErr, retryAttempt); ok {
+		s.recordAttemptError(builtErr, retryAttempt, true, retryDelay)
+		if !s.sleepBeforeRetry(retryDelay) {
+			return false, false
+		}
+		s.totalRetryAttempts++
+		return true, true
+	}
+
+	s.recordAttemptError(builtErr, retryAttempt, false, 0)
+	_, ok := s.handleTerminalSendError(sendErr, builtErr, errPrefix)
+	return false, ok
 }
 
 // ServeHTTP implements http.Handler.
@@ -236,51 +327,73 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if client == nil {
 			// Treat unsupported protocol as a send error so the router can fallback.
 			syntheticErr := errors.New("unsupported outbound protocol")
-			if _, ok := loop.handleSendError(syntheticErr, ""); !ok {
+			builtErr := buildSendError(syntheticErr, loop.attemptNum)
+			loop.recordAttemptError(builtErr, 0, false, 0)
+			if _, ok := loop.handleTerminalSendError(syntheticErr, builtErr, ""); !ok {
 				return
 			}
 			continue
 		}
 
-		req.Model = loop.target.Model
+		for retryAttempt := 0; ; retryAttempt++ {
+			req.Model = loop.target.Model
 
-		// Call RequestModifier to allow caller to set OutboundExtra per attempt.
-		req.OutboundExtra = nil
-		if h.reqMod != nil {
-			h.reqMod(r.Context(), req, loop.target)
-		}
+			// Call RequestModifier to allow caller to set OutboundExtra per attempt.
+			req.OutboundExtra = nil
+			if h.reqMod != nil {
+				h.reqMod(r.Context(), req, loop.target)
+			}
 
-		outCfg := OutboundConfig{BaseURL: loop.target.BaseURL, APIKey: loop.target.APIKey, ProxyURL: loop.target.ProxyURL, Header: loop.target.Header}
+			admission, err := loop.acquireAttempt(retryAttempt)
+			if err != nil {
+				releaseAttempt(admission)
+				loop.writeAcquireErrorAndComplete(err)
+				return
+			}
 
-		if req.Stream {
-			ch, sendErr := client.SendStream(r.Context(), req, outCfg)
+			outCfg := OutboundConfig{BaseURL: loop.target.BaseURL, APIKey: loop.target.APIKey, ProxyURL: loop.target.ProxyURL, Header: loop.target.Header}
+
+			if req.Stream {
+				ch, sendErr := client.SendStream(r.Context(), req, outCfg)
+				if sendErr != nil {
+					releaseAttempt(admission)
+					retrySameTarget, ok := loop.handleSendError(sendErr, "upstream stream error: ", retryAttempt)
+					if !ok {
+						return
+					}
+					if retrySameTarget {
+						continue
+					}
+					break
+				}
+
+				// SendStream succeeded — commit to streaming. No more fallback.
+				h.router.OnSuccess(r.Context(), info, loop.target)
+				loop.handleStreaming(ch)
+				releaseAttempt(admission)
+				return
+			}
+
+			// Non-streaming path.
+			resp, sendErr := client.Send(r.Context(), req, outCfg)
+			releaseAttempt(admission)
 			if sendErr != nil {
-				if _, ok := loop.handleSendError(sendErr, "upstream stream error: "); !ok {
+				retrySameTarget, ok := loop.handleSendError(sendErr, "upstream error: ", retryAttempt)
+				if !ok {
 					return
 				}
-				continue
+				if retrySameTarget {
+					continue
+				}
+				break
 			}
 
-			// SendStream succeeded — commit to streaming. No more fallback.
+			// Non-streaming success — record TTFB immediately after Send returns.
+			firstByteTime := time.Now()
 			h.router.OnSuccess(r.Context(), info, loop.target)
-			loop.handleStreaming(ch)
+			loop.handleNonStreaming(resp, firstByteTime)
 			return
 		}
-
-		// Non-streaming path.
-		resp, sendErr := client.Send(r.Context(), req, outCfg)
-		if sendErr != nil {
-			if _, ok := loop.handleSendError(sendErr, "upstream error: "); !ok {
-				return
-			}
-			continue
-		}
-
-		// Non-streaming success — record TTFB immediately after Send returns.
-		firstByteTime := time.Now()
-		h.router.OnSuccess(r.Context(), info, loop.target)
-		loop.handleNonStreaming(resp, firstByteTime)
-		return
 	}
 }
 
@@ -320,6 +433,8 @@ func (s *retryLoopState) handleNonStreaming(resp *Response, firstByteTime time.T
 			ActualModel:      actualModel,
 			IRResponse:       resp,
 			AttemptNum:       s.attemptNum,
+			RetryAttempts:    s.totalRetryAttempts,
+			QueueWait:        s.totalQueueWait,
 		})
 	}()
 
@@ -505,6 +620,8 @@ func (s *retryLoopState) handleStreaming(ch <-chan StreamResult) {
 		ActualModel:      summary.actualModel,
 		IRResponse:       nil,
 		AttemptNum:       s.attemptNum,
+		RetryAttempts:    s.totalRetryAttempts,
+		QueueWait:        s.totalQueueWait,
 	})
 }
 

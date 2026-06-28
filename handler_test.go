@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"reflect"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -47,6 +47,35 @@ type recordingStatsReporter struct {
 	attemptErrors []AttemptErrorEvent
 	onChunk       func(StreamChunkEvent)
 	onComplete    func(CompleteEvent)
+}
+
+type testAttemptController struct {
+	acquire func(ctx context.Context, info RouteInfo, target RouteResult, routeAttempt int, retryAttempt int) (AttemptAdmission, error)
+	retry   func(ctx context.Context, info RouteInfo, target RouteResult, sendErr SendError, routeAttempt int, retryAttempt int) (time.Duration, bool)
+}
+
+func (c *testAttemptController) Acquire(ctx context.Context, info RouteInfo, target RouteResult, routeAttempt int, retryAttempt int) (AttemptAdmission, error) {
+	if c.acquire != nil {
+		return c.acquire(ctx, info, target, routeAttempt, retryAttempt)
+	}
+	return AttemptAdmission{}, nil
+}
+
+func (c *testAttemptController) RetryDelay(ctx context.Context, info RouteInfo, target RouteResult, sendErr SendError, routeAttempt int, retryAttempt int) (time.Duration, bool) {
+	if c.retry != nil {
+		return c.retry(ctx, info, target, sendErr, routeAttempt, retryAttempt)
+	}
+	return 0, false
+}
+
+type testPermit struct {
+	release func()
+}
+
+func (p testPermit) Release() {
+	if p.release != nil {
+		p.release()
+	}
 }
 
 func (r *recordingStatsReporter) OnRequestStart(_ context.Context, e RequestStartEvent) {
@@ -128,6 +157,189 @@ func (r *recordingStatsReporter) OnAttemptError(_ context.Context, e AttemptErro
 	defer r.mu.Unlock()
 	r.order = append(r.order, "attempt_error")
 	r.attemptErrors = append(r.attemptErrors, e)
+}
+
+func TestHandler_AttemptControllerLimitsStreamingUntilStreamEnds(t *testing.T) {
+	var (
+		mu            sync.Mutex
+		activeStreams int
+		maxActive     int
+		acquires      int
+		releases      int
+	)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		activeStreams++
+		if activeStreams > maxActive {
+			maxActive = activeStreams
+		}
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			activeStreams--
+			mu.Unlock()
+		}()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-1\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")
+		flusher.Flush()
+		time.Sleep(50 * time.Millisecond)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	gate := make(chan struct{}, 1)
+	controller := &testAttemptController{
+		acquire: func(ctx context.Context, info RouteInfo, target RouteResult, routeAttempt int, retryAttempt int) (AttemptAdmission, error) {
+			select {
+			case gate <- struct{}{}:
+				mu.Lock()
+				acquires++
+				mu.Unlock()
+				return AttemptAdmission{
+					Permit: testPermit{release: func() {
+						<-gate
+						mu.Lock()
+						releases++
+						mu.Unlock()
+					}},
+				}, nil
+			case <-ctx.Done():
+				return AttemptAdmission{}, ctx.Err()
+			}
+		},
+	}
+
+	h := &Handler{
+		codec:             &openaiChatCodec{},
+		router:            &staticRouter{result: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: upstream.URL, APIKey: "sk-test", Model: "gpt-4o-mini"}},
+		attemptController: controller,
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}`
+			r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusOK {
+				t.Errorf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if maxActive != 1 {
+		t.Fatalf("max active upstream streams = %d, want 1", maxActive)
+	}
+	if acquires != 2 || releases != 2 {
+		t.Fatalf("acquires/releases = %d/%d, want 2/2", acquires, releases)
+	}
+}
+
+func TestHandler_RetriesStreamingSetupErrorBeforeFallback(t *testing.T) {
+	callCount := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error":"service unavailable"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-1\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	controller := &testAttemptController{
+		retry: func(ctx context.Context, info RouteInfo, target RouteResult, sendErr SendError, routeAttempt int, retryAttempt int) (time.Duration, bool) {
+			if sendErr.StatusCode == http.StatusServiceUnavailable && retryAttempt == 0 {
+				return time.Millisecond, true
+			}
+			return 0, false
+		},
+	}
+	reporter := &recordingStatsReporter{}
+	h := &Handler{
+		codec:             &openaiChatCodec{},
+		router:            &staticRouter{result: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: upstream.URL, APIKey: "sk-test", Model: "gpt-4o-mini"}},
+		stats:             reporter,
+		attemptController: controller,
+	}
+
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}`
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if callCount != 2 {
+		t.Fatalf("upstream calls = %d, want 2", callCount)
+	}
+	if len(reporter.attemptErrors) != 1 {
+		t.Fatalf("attempt errors = %d, want 1", len(reporter.attemptErrors))
+	}
+	if !reporter.attemptErrors[0].WillRetry || reporter.attemptErrors[0].RetryAttempt != 0 {
+		t.Fatalf("attempt error retry fields = willRetry:%v retryAttempt:%d, want true/0", reporter.attemptErrors[0].WillRetry, reporter.attemptErrors[0].RetryAttempt)
+	}
+	if got := reporter.completions[0].RetryAttempts; got != 1 {
+		t.Fatalf("complete RetryAttempts = %d, want 1", got)
+	}
+}
+
+func TestHandler_DoesNotRetryAfterStreamingStarts(t *testing.T) {
+	callCount := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {not-json}\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	controller := &testAttemptController{
+		retry: func(ctx context.Context, info RouteInfo, target RouteResult, sendErr SendError, routeAttempt int, retryAttempt int) (time.Duration, bool) {
+			return time.Millisecond, true
+		},
+	}
+	reporter := &recordingStatsReporter{}
+	h := &Handler{
+		codec:             &openaiChatCodec{},
+		router:            &staticRouter{result: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: upstream.URL, APIKey: "sk-test", Model: "gpt-4o-mini"}},
+		stats:             reporter,
+		attemptController: controller,
+	}
+
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}`
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if callCount != 1 {
+		t.Fatalf("upstream calls = %d, want 1", callCount)
+	}
+	if len(reporter.completions) != 1 || reporter.completions[0].Status != CompletionStatusError {
+		t.Fatalf("completion = %+v, want one error completion", reporter.completions)
+	}
+	if reporter.completions[0].RetryAttempts != 0 {
+		t.Fatalf("RetryAttempts = %d, want 0", reporter.completions[0].RetryAttempts)
+	}
 }
 
 func TestHandler_OnRequestStart_TracksOriginalAndMappedModel(t *testing.T) {
@@ -1068,6 +1280,79 @@ func TestHandler_NonStreaming_FallbackOnError(t *testing.T) {
 	}
 	if !reflect.DeepEqual(router.successTarget, router.fallback) {
 		t.Fatalf("OnSuccess called with wrong target, got %+v want %+v", router.successTarget, router.fallback)
+	}
+}
+
+func TestHandler_NonStreaming_RetryExhaustedBeforeFallback(t *testing.T) {
+	primaryCalls := 0
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"service unavailable"}`))
+	}))
+	defer primary.Close()
+
+	fallbackCalls := 0
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-2","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"Fallback!"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer fallback.Close()
+
+	controller := &testAttemptController{
+		retry: func(ctx context.Context, info RouteInfo, target RouteResult, sendErr SendError, routeAttempt int, retryAttempt int) (time.Duration, bool) {
+			if routeAttempt == 1 && retryAttempt == 0 && sendErr.StatusCode == http.StatusServiceUnavailable {
+				return time.Millisecond, true
+			}
+			return 0, false
+		},
+	}
+	router := &fallbackRouter{
+		primary:  RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: primary.URL, APIKey: "sk-test", Model: "gpt-4o-mini"},
+		fallback: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: fallback.URL, APIKey: "sk-test2", Model: "gpt-4o"},
+	}
+	reporter := &recordingStatsReporter{}
+	h := &Handler{
+		codec:             &openaiChatCodec{},
+		router:            router,
+		stats:             reporter,
+		attemptController: controller,
+	}
+
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if primaryCalls != 2 {
+		t.Fatalf("primary calls = %d, want 2", primaryCalls)
+	}
+	if fallbackCalls != 1 {
+		t.Fatalf("fallback calls = %d, want 1", fallbackCalls)
+	}
+	if len(reporter.attemptErrors) != 2 {
+		t.Fatalf("attempt errors = %d, want 2", len(reporter.attemptErrors))
+	}
+	if !reporter.attemptErrors[0].WillRetry || reporter.attemptErrors[0].RetryAttempt != 0 {
+		t.Fatalf("first attempt error = %+v, want willRetry retryAttempt=0", reporter.attemptErrors[0])
+	}
+	if reporter.attemptErrors[1].WillRetry || reporter.attemptErrors[1].RetryAttempt != 1 {
+		t.Fatalf("second attempt error = %+v, want terminal retryAttempt=1", reporter.attemptErrors[1])
+	}
+	if len(reporter.completions) != 1 {
+		t.Fatalf("completions = %d, want 1", len(reporter.completions))
+	}
+	complete := reporter.completions[0]
+	if complete.AttemptNum != 2 {
+		t.Fatalf("AttemptNum = %d, want 2", complete.AttemptNum)
+	}
+	if complete.RetryAttempts != 1 {
+		t.Fatalf("RetryAttempts = %d, want 1", complete.RetryAttempts)
 	}
 }
 

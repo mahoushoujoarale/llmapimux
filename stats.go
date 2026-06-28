@@ -81,13 +81,18 @@ type CompleteEvent struct {
 
 	IRResponse *Response
 
-	AttemptNum int // which attempt succeeded (1 = no retry)
+	AttemptNum    int // which route/fallback attempt succeeded (1 = no fallback)
+	RetryAttempts int // physical retries across this request
+	QueueWait     time.Duration
 }
 
 // AttemptErrorEvent is fired each time a send attempt fails and is retried.
 type AttemptErrorEvent struct {
-	RequestID  string
-	AttemptNum int       // which attempt failed (1 = primary from Route())
-	Target     RouteResult // the target that failed
-	SendErr    SendError   // error details
+	RequestID    string
+	AttemptNum   int         // which route/fallback attempt failed (1 = primary from Route())
+	RetryAttempt int         // physical retry attempt within this route target (0 = first try)
+	Target       RouteResult // the target that failed
+	SendErr      SendError   // error details
+	WillRetry    bool
+	RetryDelay   time.Duration
 }
