@@ -795,17 +795,17 @@ func TestDecodeAnthropicResponse_Basic(t *testing.T) {
 	if resp.Content[0].Text == nil || resp.Content[0].Text.Text != "Hello!" {
 		t.Errorf("Content[0].Text = %v", resp.Content[0].Text)
 	}
-	if resp.Usage.InputTokens != 10 {
-		t.Errorf("Usage.InputTokens = %d, want 10", resp.Usage.InputTokens)
+	if resp.Usage.PromptTokens != 15 {
+		t.Errorf("Usage.PromptTokens = %d, want 15 (input_tokens + cache_creation + cache_read)", resp.Usage.PromptTokens)
 	}
-	if resp.Usage.OutputTokens != 5 {
-		t.Errorf("Usage.OutputTokens = %d, want 5", resp.Usage.OutputTokens)
+	if resp.Usage.CompletionTokens != 5 {
+		t.Errorf("Usage.CompletionTokens = %d, want 5", resp.Usage.CompletionTokens)
 	}
-	if resp.Usage.CacheCreationTokens != 2 {
-		t.Errorf("Usage.CacheCreationTokens = %d, want 2", resp.Usage.CacheCreationTokens)
+	if resp.Usage.PromptCacheWriteTokens != 2 {
+		t.Errorf("Usage.PromptCacheWriteTokens = %d, want 2", resp.Usage.PromptCacheWriteTokens)
 	}
-	if resp.Usage.CacheReadTokens != 3 {
-		t.Errorf("Usage.CacheReadTokens = %d, want 3", resp.Usage.CacheReadTokens)
+	if resp.Usage.PromptCacheHitTokens != 3 {
+		t.Errorf("Usage.PromptCacheHitTokens = %d, want 3", resp.Usage.PromptCacheHitTokens)
 	}
 }
 
@@ -937,10 +937,10 @@ func TestEncodeAnthropicResponse_Basic(t *testing.T) {
 			{Type: ContentTypeText, Text: &TextContent{Text: "Hello!"}},
 		},
 		Usage: Usage{
-			InputTokens:         10,
-			OutputTokens:        5,
-			CacheCreationTokens: 2,
-			CacheReadTokens:     3,
+			PromptTokens:         10,
+			CompletionTokens:        5,
+			PromptCacheWriteTokens: 2,
+			PromptCacheHitTokens:     3,
 		},
 	}
 
@@ -975,8 +975,8 @@ func TestEncodeAnthropicResponse_Basic(t *testing.T) {
 	if !ok {
 		t.Fatal("usage is not an object")
 	}
-	if usage["input_tokens"].(float64) != 10 {
-		t.Errorf("usage.input_tokens = %v, want 10", usage["input_tokens"])
+	if usage["input_tokens"].(float64) != 5 {
+		t.Errorf("usage.input_tokens = %v, want 5 (PromptTokens - PromptCacheWriteTokens - PromptCacheHitTokens)", usage["input_tokens"])
 	}
 	if usage["output_tokens"].(float64) != 5 {
 		t.Errorf("usage.output_tokens = %v, want 5", usage["output_tokens"])
@@ -1179,7 +1179,7 @@ func TestEncodeAnthropicResponse_PauseTurn(t *testing.T) {
 		Model:      "claude-sonnet-4-20250514",
 		StopReason: StopReasonPauseTurn,
 		Content:    []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Paused."}}},
-		Usage:      Usage{InputTokens: 5, OutputTokens: 3},
+		Usage:      Usage{PromptTokens: 5, CompletionTokens: 3},
 	}
 
 	body, err := EncodeAnthropicResponse(resp)
@@ -1283,8 +1283,8 @@ func TestDecodeAnthropicStreamEvent_MessageStart(t *testing.T) {
 	if event.Response.Model != "claude-sonnet-4-20250514" {
 		t.Errorf("model = %q", event.Response.Model)
 	}
-	if event.Response.Usage.InputTokens != 10 {
-		t.Errorf("InputTokens = %d, want 10", event.Response.Usage.InputTokens)
+	if event.Response.Usage.PromptTokens != 10 {
+		t.Errorf("InputTokens = %d, want 10", event.Response.Usage.PromptTokens)
 	}
 }
 
@@ -1452,8 +1452,8 @@ func TestDecodeAnthropicStreamEvent_MessageDelta(t *testing.T) {
 	if event.Usage == nil {
 		t.Fatal("Usage is nil")
 	}
-	if event.Usage.OutputTokens != 15 {
-		t.Errorf("OutputTokens = %d, want 15", event.Usage.OutputTokens)
+	if event.Usage.CompletionTokens != 15 {
+		t.Errorf("OutputTokens = %d, want 15", event.Usage.CompletionTokens)
 	}
 }
 
@@ -1504,7 +1504,7 @@ func TestEncodeAnthropicStreamEvent_MessageStart(t *testing.T) {
 		Response: &Response{
 			ID:    "msg_1",
 			Model: "claude-sonnet-4-20250514",
-			Usage: Usage{InputTokens: 10},
+			Usage: Usage{PromptTokens: 10},
 		},
 	}
 	eventType, data, err := EncodeAnthropicStreamEvent(event)
@@ -1833,7 +1833,7 @@ func TestEncodeAnthropicStreamEvent_MessageDelta(t *testing.T) {
 	event := &StreamEvent{
 		Type:       StreamEventDelta,
 		StopReason: &stopReason,
-		Usage:      &Usage{OutputTokens: 15},
+		Usage:      &Usage{CompletionTokens: 15},
 	}
 	eventType, data, err := EncodeAnthropicStreamEvent(event)
 	if err != nil {
@@ -2010,17 +2010,17 @@ func TestAnthropicResponseRoundTrip(t *testing.T) {
 		t.Errorf("Content[1].Text = %v", txt.Text)
 	}
 
-	if redecoded.Usage.InputTokens != 100 {
-		t.Errorf("Usage.InputTokens = %d, want 100", redecoded.Usage.InputTokens)
+	if redecoded.Usage.PromptTokens != 115 {
+		t.Errorf("Usage.PromptTokens = %d, want 115 (input_tokens + cache_creation + cache_read)", redecoded.Usage.PromptTokens)
 	}
-	if redecoded.Usage.OutputTokens != 50 {
-		t.Errorf("Usage.OutputTokens = %d, want 50", redecoded.Usage.OutputTokens)
+	if redecoded.Usage.CompletionTokens != 50 {
+		t.Errorf("Usage.CompletionTokens = %d, want 50", redecoded.Usage.CompletionTokens)
 	}
-	if redecoded.Usage.CacheCreationTokens != 10 {
-		t.Errorf("Usage.CacheCreationTokens = %d, want 10", redecoded.Usage.CacheCreationTokens)
+	if redecoded.Usage.PromptCacheWriteTokens != 10 {
+		t.Errorf("Usage.PromptCacheWriteTokens = %d, want 10", redecoded.Usage.PromptCacheWriteTokens)
 	}
-	if redecoded.Usage.CacheReadTokens != 5 {
-		t.Errorf("Usage.CacheReadTokens = %d, want 5", redecoded.Usage.CacheReadTokens)
+	if redecoded.Usage.PromptCacheHitTokens != 5 {
+		t.Errorf("Usage.PromptCacheHitTokens = %d, want 5", redecoded.Usage.PromptCacheHitTokens)
 	}
 }
 
@@ -2602,7 +2602,7 @@ func TestEncodeAnthropicResponse_RefusalToText(t *testing.T) {
 		Content: []ContentPart{
 			{Type: ContentTypeRefusal, Refusal: &RefusalContent{Refusal: "I cannot help with that."}},
 		},
-		Usage: Usage{InputTokens: 10, OutputTokens: 5},
+		Usage: Usage{PromptTokens: 10, CompletionTokens: 5},
 	}
 
 	data, err := EncodeAnthropicResponse(resp)

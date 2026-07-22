@@ -473,16 +473,15 @@ func encodeAnthropicCitations(citations []Citation) []json.RawMessage {
 	return result
 }
 
-// defaultAnthropicMaxTokens is the fallback max_tokens when the inbound request
-// did not specify one. Anthropic requires a positive value; use a conservative
-// default that works for all current Claude models.
-const defaultAnthropicMaxTokens = 4096
-
 // EncodeAnthropicRequest encodes a unified IR Request into an Anthropic Messages API JSON body.
 func EncodeAnthropicRequest(req *Request) ([]byte, error) {
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
-		maxTokens = defaultAnthropicMaxTokens
+		if m := ModelMaxOutputTokens(req.Model); m > 0 {
+			maxTokens = m
+		} else {
+			maxTokens = FallbackMaxTokens
+		}
 	}
 	raw := anthropic.Request{
 		Model:         req.Model,
@@ -791,10 +790,12 @@ func DecodeAnthropicResponse(body []byte) (*Response, error) {
 		ID:    raw.ID,
 		Model: raw.Model,
 		Usage: Usage{
-			InputTokens:         raw.Usage.InputTokens,
-			OutputTokens:        raw.Usage.OutputTokens,
-			CacheCreationTokens: raw.Usage.CacheCreationInputTokens,
-			CacheReadTokens:     raw.Usage.CacheReadInputTokens,
+			PromptTokens:          raw.Usage.InputTokens + raw.Usage.CacheCreationInputTokens + raw.Usage.CacheReadInputTokens,
+			PromptCacheWriteTokens: raw.Usage.CacheCreationInputTokens,
+			PromptCacheHitTokens:   raw.Usage.CacheReadInputTokens,
+			CompletionTokens:      raw.Usage.OutputTokens,
+			ServerToolUseTokens:   raw.Usage.ServerToolUseTokens,
+			TotalTokens:           raw.Usage.InputTokens + raw.Usage.CacheCreationInputTokens + raw.Usage.CacheReadInputTokens + raw.Usage.OutputTokens,
 		},
 	}
 
@@ -836,10 +837,12 @@ func DecodeAnthropicStreamEvent(eventType string, data []byte) (*StreamEvent, er
 				ID:    raw.Message.ID,
 				Model: raw.Message.Model,
 				Usage: Usage{
-					InputTokens:         raw.Message.Usage.InputTokens,
-					OutputTokens:        raw.Message.Usage.OutputTokens,
-					CacheCreationTokens: raw.Message.Usage.CacheCreationInputTokens,
-					CacheReadTokens:     raw.Message.Usage.CacheReadInputTokens,
+					PromptTokens:           raw.Message.Usage.InputTokens + raw.Message.Usage.CacheCreationInputTokens + raw.Message.Usage.CacheReadInputTokens,
+					PromptCacheWriteTokens: raw.Message.Usage.CacheCreationInputTokens,
+					PromptCacheHitTokens:   raw.Message.Usage.CacheReadInputTokens,
+					CompletionTokens:       raw.Message.Usage.OutputTokens,
+					ServerToolUseTokens:    raw.Message.Usage.ServerToolUseTokens,
+					TotalTokens:            raw.Message.Usage.InputTokens + raw.Message.Usage.CacheCreationInputTokens + raw.Message.Usage.CacheReadInputTokens + raw.Message.Usage.OutputTokens,
 				},
 			},
 		}, nil
@@ -935,7 +938,7 @@ func DecodeAnthropicStreamEvent(eventType string, data []byte) (*StreamEvent, er
 		}
 		stopReason := decodeAnthropicStopReason(raw.Delta.StopReason)
 		usage := Usage{
-			OutputTokens: raw.Usage.OutputTokens,
+			CompletionTokens: raw.Usage.OutputTokens,
 		}
 		return &StreamEvent{
 			Type:       StreamEventDelta,
@@ -988,10 +991,11 @@ func EncodeAnthropicStreamEvent(event *StreamEvent) (string, []byte, error) {
 				Model: event.Response.Model,
 				Role:  "assistant",
 				Usage: anthropic.Usage{
-					InputTokens:              event.Response.Usage.InputTokens,
-					OutputTokens:             event.Response.Usage.OutputTokens,
-					CacheCreationInputTokens: event.Response.Usage.CacheCreationTokens,
-					CacheReadInputTokens:     event.Response.Usage.CacheReadTokens,
+					InputTokens:              event.Response.Usage.PromptTokens - event.Response.Usage.PromptCacheWriteTokens - event.Response.Usage.PromptCacheHitTokens,
+					OutputTokens:             event.Response.Usage.CompletionTokens,
+					CacheCreationInputTokens: event.Response.Usage.PromptCacheWriteTokens,
+					CacheReadInputTokens:     event.Response.Usage.PromptCacheHitTokens,
+					ServerToolUseTokens:      event.Response.Usage.ServerToolUseTokens,
 				},
 			}
 		}
@@ -1039,10 +1043,11 @@ func EncodeAnthropicStreamEvent(event *StreamEvent) (string, []byte, error) {
 			}
 			if event.Usage != nil {
 				raw.Usage = anthropic.Usage{
-					InputTokens:              event.Usage.InputTokens,
-					OutputTokens:             event.Usage.OutputTokens,
-					CacheCreationInputTokens: event.Usage.CacheCreationTokens,
-					CacheReadInputTokens:     event.Usage.CacheReadTokens,
+					InputTokens:              event.Usage.PromptTokens - event.Usage.PromptCacheWriteTokens - event.Usage.PromptCacheHitTokens,
+					OutputTokens:             event.Usage.CompletionTokens,
+					CacheCreationInputTokens: event.Usage.PromptCacheWriteTokens,
+					CacheReadInputTokens:     event.Usage.PromptCacheHitTokens,
+					ServerToolUseTokens:      event.Usage.ServerToolUseTokens,
 				}
 			}
 			data, err := json.Marshal(raw)
@@ -1163,10 +1168,11 @@ func EncodeAnthropicResponse(resp *Response) ([]byte, error) {
 		Role:  "assistant",
 		Model: resp.Model,
 		Usage: anthropic.Usage{
-			InputTokens:              resp.Usage.InputTokens,
-			OutputTokens:             resp.Usage.OutputTokens,
-			CacheCreationInputTokens: resp.Usage.CacheCreationTokens,
-			CacheReadInputTokens:     resp.Usage.CacheReadTokens,
+			InputTokens:              resp.Usage.PromptTokens - resp.Usage.PromptCacheWriteTokens - resp.Usage.PromptCacheHitTokens,
+			OutputTokens:             resp.Usage.CompletionTokens,
+			CacheCreationInputTokens: resp.Usage.PromptCacheWriteTokens,
+			CacheReadInputTokens:     resp.Usage.PromptCacheHitTokens,
+			ServerToolUseTokens:      resp.Usage.ServerToolUseTokens,
 		},
 	}
 
