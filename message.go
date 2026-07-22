@@ -79,6 +79,10 @@ type ContentPart struct {
 	RedactedThinking    *RedactedThinkingContent    `json:"redacted_thinking,omitempty"`
 	Refusal             *RefusalContent             `json:"refusal,omitempty"`
 	Citations           []Citation                  `json:"citations,omitempty"`
+	// SourceType records the original ContentType before cross-protocol conversion.
+	// Used by downstream consumers (Stats, logging) to identify degradation.
+	// Silently dropped on wire — not serialized to any protocol.
+	SourceType ContentType `json:"source_type,omitempty"`
 }
 
 // TextContent holds plain text.
@@ -234,13 +238,25 @@ type Response struct {
 }
 
 // Usage tracks token consumption for a request/response pair.
+// Field names use OpenAI-style terminology as the canonical IR representation;
+// each protocol's converter maps to/from its own wire field names.
 type Usage struct {
-	InputTokens         int `json:"input_tokens,omitempty"`
-	OutputTokens        int `json:"output_tokens,omitempty"`
-	TotalTokens         int `json:"total_tokens,omitempty"`
-	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
-	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
-	ThinkingTokens      int `json:"thinking_tokens,omitempty"`
+	// === Input side ===
+	PromptTokens          int `json:"prompt_tokens,omitempty"`            // Total input tokens (includes cache hit)
+	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`  // Cache hit tokens (Anthropic: cache_read_input_tokens, OpenAI: cached_tokens, Gemini: cachedContentTokenCount)
+	PromptCacheWriteTokens int `json:"prompt_cache_write_tokens,omitempty"` // Cache write tokens (Anthropic: cache_creation_input_tokens)
+	PromptAudioTokens     int `json:"prompt_audio_tokens,omitempty"`       // Input audio tokens (OpenAI: prompt_details.audio_tokens)
+
+	// === Output side ===
+	CompletionTokens              int `json:"completion_tokens,omitempty"`                // Total output tokens
+	CompletionReasoningTokens     int `json:"completion_reasoning_tokens,omitempty"`     // Reasoning/thinking tokens (OpenAI: reasoning_tokens, Gemini: thoughtsTokenCount)
+	CompletionAudioTokens         int `json:"completion_audio_tokens,omitempty"`         // Output audio tokens (OpenAI: completion_details.audio_tokens)
+	CompletionAcceptedPrediction  int `json:"completion_accepted_prediction,omitempty"`  // Accepted prediction tokens (OpenAI: accepted_prediction_tokens)
+	CompletionRejectedPrediction  int `json:"completion_rejected_prediction,omitempty"`  // Rejected prediction tokens (OpenAI: rejected_prediction_tokens)
+	ServerToolUseTokens           int `json:"server_tool_use_tokens,omitempty"`           // Server-side tool tokens (Anthropic: server_tool_use_tokens)
+
+	// === Summary ===
+	TotalTokens int `json:"total_tokens,omitempty"` // = PromptTokens + CompletionTokens (usually from upstream)
 }
 
 // StreamEventType identifies the kind of streaming event.

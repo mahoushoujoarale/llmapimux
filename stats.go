@@ -75,6 +75,8 @@ type CompleteEvent struct {
 	Usage Usage
 
 	OutputThroughput float64
+	TPOT             time.Duration // Time Per Output Token = (TotalLatency - TTFB) / CompletionTokens (0 if non-streaming or no output tokens)
+	Chunks           int           // Total streaming chunks received (0 if non-streaming)
 
 	StopReason  StopReason
 	ActualModel string
