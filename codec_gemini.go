@@ -45,11 +45,44 @@ func (c *geminiCodec) EncodeResponse(resp *Response) ([]byte, error) {
 }
 
 func (c *geminiCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan StreamResult) {
+	var accumulatedUsage Usage
+	var lastStopReason StopReason
+
 	for result := range ch {
 		if result.Err != nil {
 			// Cannot change status code at this point — just stop.
 			break
 		}
+
+		// Accumulate usage from early events (e.g. Anthropic message_start
+		// carries PromptTokens in StreamEventStart.Response.Usage).
+		// Gemini only emits usage in the final chunk, so we must defer it.
+		if result.Event != nil {
+			if result.Event.Usage != nil {
+				mergeStreamUsage(&accumulatedUsage, result.Event.Usage)
+			}
+			if result.Event.Response != nil && result.Event.Response.Usage.PromptTokens != 0 {
+				mergeStreamUsage(&accumulatedUsage, &result.Event.Response.Usage)
+			}
+			// Capture stop reasons from delta events (e.g. Anthropic message_delta).
+			if result.Event.StopReason != nil {
+				lastStopReason = *result.Event.StopReason
+			}
+		}
+
+		// On stop event, inject accumulated usage and stop reason.
+		if result.Event != nil && result.Event.Type == StreamEventStop {
+			if result.Event.Usage == nil && accumulatedUsage.PromptTokens != 0 {
+				result.Event.Usage = &Usage{}
+				*result.Event.Usage = accumulatedUsage
+			} else if result.Event.Usage != nil && result.Event.Usage.PromptTokens == 0 && accumulatedUsage.PromptTokens != 0 {
+				mergeStreamUsage(result.Event.Usage, &accumulatedUsage)
+			}
+			if result.Event.StopReason == nil && lastStopReason != "" {
+				result.Event.StopReason = &lastStopReason
+			}
+		}
+
 		data, err := EncodeGeminiStreamChunk(result.Event)
 		if err != nil {
 			break

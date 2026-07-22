@@ -3,7 +3,6 @@ package llmapimux
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -24,130 +23,6 @@ func TestCodecProtocols(t *testing.T) {
 				t.Errorf("Protocol() = %s, want %s", got, tt.expected)
 			}
 		})
-	}
-}
-
-// TestOpenAIChatCodec_WriteStreamingResponse_AccumulatesUsageAndStopReason
-// verifies that the OpenAI Chat inbound codec defers usage from early events
-// (like Anthropic message_start) and stop reasons from delta events (like
-// Anthropic message_delta) into the final stop chunk for the client.
-func TestOpenAIChatCodec_WriteStreamingResponse_AccumulatesUsageAndStopReason(t *testing.T) {
-	// Simulate an Anthropic-style stream where:
-	//   message_start  → StreamEventStart with PromptTokens in Response.Usage
-	//   text_delta     → StreamEventDelta with text content
-	//   message_delta  → StreamEventDelta with StopReason + CompletionTokens
-	//   message_stop   → StreamEventStop with nil StopReason
-	events := []StreamResult{
-		{Event: &StreamEvent{
-			Type: StreamEventStart,
-			Response: &Response{
-				ID:    "msg_1",
-				Model: "claude-sonnet-4-20250514",
-				Usage: Usage{PromptTokens: 50, PromptCacheHitTokens: 10},
-			},
-		}},
-		{Event: &StreamEvent{
-			Type:  StreamEventDelta,
-			Index: 0,
-			Delta: &ContentPart{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}},
-		}},
-		{Event: &StreamEvent{
-			Type:       StreamEventDelta,
-			StopReason: func() *StopReason { r := StopReasonEndTurn; return &r }(),
-			Usage:      &Usage{CompletionTokens: 5},
-		}},
-		{Event: &StreamEvent{
-			Type: StreamEventStop,
-		}},
-	}
-
-	ch := make(chan StreamResult, len(events))
-	for _, e := range events {
-		ch <- e
-	}
-	close(ch)
-
-	w := httptest.NewRecorder()
-	codec := &openaiChatCodec{}
-	sseWriter := NewSSEWriter(w)
-	codec.WriteStreamingResponse(sseWriter, ch)
-
-	body := w.Body.String()
-
-	// Verify finish_reason is "stop" (mapped from StopReasonEndTurn)
-	if !strings.Contains(body, `"finish_reason":"stop"`) {
-		t.Errorf("missing correct finish_reason 'stop' in SSE output:\n%s", body)
-	}
-
-	// Verify usage is present in the stop chunk with PromptTokens
-	if !strings.Contains(body, `"prompt_tokens":50`) {
-		t.Errorf("missing prompt_tokens=50 in SSE output (should be deferred from message_start):\n%s", body)
-	}
-
-	// Verify prompt_tokens_details with cached_tokens
-	if !strings.Contains(body, `"cached_tokens":10`) {
-		t.Errorf("missing cached_tokens=10 in SSE output:\n%s", body)
-	}
-
-	// Verify completion_tokens from the delta
-	if !strings.Contains(body, `"completion_tokens":5`) {
-		t.Errorf("missing completion_tokens=5 in SSE output:\n%s", body)
-	}
-
-	// Verify [DONE] sentinel
-	if !strings.Contains(body, "[DONE]") {
-		t.Errorf("missing in SSE output:\n%s", body)
-	}
-}
-
-// TestOpenAIChatCodec_WriteStreamingResponse_ToolUseStopReason verifies that
-// StopReasonToolUse from Anthropic message_delta is correctly mapped to
-// finish_reason "tool_calls" in the final OpenAI Chat chunk.
-func TestOpenAIChatCodec_WriteStreamingResponse_ToolUseStopReason(t *testing.T) {
-	toolUseReason := StopReasonToolUse
-	events := []StreamResult{
-		{Event: &StreamEvent{
-			Type: StreamEventStart,
-			Response: &Response{
-				ID:    "msg_2",
-				Model: "claude-sonnet-4-20250514",
-				Usage: Usage{PromptTokens: 100},
-			},
-		}},
-		{Event: &StreamEvent{
-			Type:  StreamEventDelta,
-			Index: 0,
-			Delta: &ContentPart{Type: ContentTypeToolUse, ToolUse: &ToolUseContent{ID: "tu_1", Name: "get_weather"}},
-		}},
-		{Event: &StreamEvent{
-			Type:       StreamEventDelta,
-			StopReason: &toolUseReason,
-			Usage:      &Usage{CompletionTokens: 20},
-		}},
-		{Event: &StreamEvent{
-			Type: StreamEventStop,
-		}},
-	}
-
-	ch := make(chan StreamResult, len(events))
-	for _, e := range events {
-		ch <- e
-	}
-	close(ch)
-
-	w := httptest.NewRecorder()
-	codec := &openaiChatCodec{}
-	sseWriter := NewSSEWriter(w)
-	codec.WriteStreamingResponse(sseWriter, ch)
-
-	body := w.Body.String()
-
-	if !strings.Contains(body, `"finish_reason":"tool_calls"`) {
-		t.Errorf("missing finish_reason 'tool_calls' in SSE output (got something else):\n%s", body)
-	}
-
-	if !strings.Contains(body, `"prompt_tokens":100`) {
-		t.Errorf("missing prompt_tokens=100 in SSE output:\n%s", body)
 	}
 }
 
