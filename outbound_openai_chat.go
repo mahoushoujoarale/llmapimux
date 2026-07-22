@@ -65,6 +65,38 @@ func (c *OpenAIChatClient) SendStream(ctx context.Context, req *Request, cfg Out
 		defer httpResp.Body.Close()
 
 		reader := NewSSEReader(httpResp.Body)
+
+		// drainTrailingUsage reads any remaining SSE chunks after a stop event,
+		// looking for usage-only chunks. OpenAI Chat may send a separate
+		// usage chunk (choices=[], usage={...}) after the finish_reason chunk
+		// when stream_options.include_usage=true.
+		drainTrailingUsage := func(stop *StreamEvent) {
+			for {
+				data, err := reader.Read()
+				if err != nil {
+					break // EOF or error — done draining
+				}
+				if string(data) == "[DONE]" {
+					break
+				}
+				trailing, err := DecodeOpenAIChatStreamChunk(data)
+				if err != nil || trailing == nil {
+					continue
+				}
+				if trailing.Usage != nil {
+					if stop.Usage == nil {
+						stop.Usage = trailing.Usage
+					} else {
+						mergeStreamUsage(stop.Usage, trailing.Usage)
+					}
+				}
+			}
+			select {
+			case ch <- StreamResult{Event: stop}:
+			case <-ctx.Done():
+			}
+		}
+
 		for {
 			data, err := reader.Read()
 			if err == io.EOF {
@@ -97,14 +129,18 @@ func (c *OpenAIChatClient) SendStream(ctx context.Context, req *Request, cfg Out
 				continue
 			}
 
-			select {
-			case ch <- StreamResult{Event: event}:
-			case <-ctx.Done():
+			// On stop event, drain trailing usage chunks before sending.
+			// OpenAI Chat sends a separate usage chunk after finish_reason
+			// when stream_options.include_usage=true — we merge it into
+			// the stop event so the downstream client gets complete usage.
+			if event.Type == StreamEventStop {
+				drainTrailingUsage(event)
 				return
 			}
 
-			// Stop after stop event
-			if event.Type == StreamEventStop {
+			select {
+			case ch <- StreamResult{Event: event}:
+			case <-ctx.Done():
 				return
 			}
 		}
