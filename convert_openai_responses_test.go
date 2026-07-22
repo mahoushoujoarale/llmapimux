@@ -1289,11 +1289,11 @@ func TestDecodeOpenAIResponsesResponse_Basic(t *testing.T) {
 		t.Errorf("Content[0] = %+v, want text 'Hello!'", resp.Content[0])
 	}
 
-	if resp.Usage.InputTokens != 10 {
-		t.Errorf("Usage.InputTokens = %d, want 10", resp.Usage.InputTokens)
+	if resp.Usage.PromptTokens != 10 {
+		t.Errorf("Usage.PromptTokens = %d, want 10", resp.Usage.PromptTokens)
 	}
-	if resp.Usage.OutputTokens != 5 {
-		t.Errorf("Usage.OutputTokens = %d, want 5", resp.Usage.OutputTokens)
+	if resp.Usage.CompletionTokens != 5 {
+		t.Errorf("Usage.CompletionTokens = %d, want 5", resp.Usage.CompletionTokens)
 	}
 	if resp.Usage.TotalTokens != 15 {
 		t.Errorf("Usage.TotalTokens = %d, want 15", resp.Usage.TotalTokens)
@@ -1460,8 +1460,8 @@ func TestEncodeOpenAIResponsesResponse_Basic(t *testing.T) {
 			{Type: ContentTypeText, Text: &TextContent{Text: "Hello!"}},
 		},
 		Usage: Usage{
-			InputTokens:  10,
-			OutputTokens: 5,
+			PromptTokens:  10,
+			CompletionTokens: 5,
 			TotalTokens:  15,
 		},
 	}
@@ -1513,7 +1513,7 @@ func TestEncodeOpenAIResponsesResponse_FunctionCall(t *testing.T) {
 				Arguments: json.RawMessage(`{"path":"/tmp"}`),
 			}},
 		},
-		Usage: Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		Usage: Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 	}
 
 	data, err := EncodeOpenAIResponsesResponse(resp)
@@ -1543,7 +1543,7 @@ func TestEncodeOpenAIResponsesResponse_FunctionCall(t *testing.T) {
 	}
 }
 
-func TestEncodeOpenAIResponsesResponse_PauseTurnDowngradesToCompleted(t *testing.T) {
+func TestEncodeOpenAIResponsesResponse_PauseTurnMapsToIncomplete(t *testing.T) {
 	resp := &Response{
 		ID:         "resp_pause",
 		Model:      "gpt-4o",
@@ -1567,12 +1567,12 @@ func TestEncodeOpenAIResponsesResponse_PauseTurnDowngradesToCompleted(t *testing
 	if err := json.Unmarshal(raw["status"], &status); err != nil {
 		t.Fatalf("unmarshal status: %v", err)
 	}
-	if status != "completed" {
-		t.Fatalf("status = %q, want %q", status, "completed")
+	if status != "incomplete" {
+		t.Fatalf("status = %q, want %q", status, "incomplete")
 	}
 }
 
-func TestEncodeOpenAIResponsesStreamEvent_PauseTurnDowngradesToCompleted(t *testing.T) {
+func TestEncodeOpenAIResponsesStreamEvent_PauseTurnMapsToIncomplete(t *testing.T) {
 	stopReason := StopReasonPauseTurn
 	event := &StreamEvent{
 		Type:       StreamEventStop,
@@ -1594,8 +1594,8 @@ func TestEncodeOpenAIResponsesStreamEvent_PauseTurnDowngradesToCompleted(t *test
 	if raw.Response == nil {
 		t.Fatal("Response is nil")
 	}
-	if raw.Response.Status != "completed" {
-		t.Fatalf("status = %q, want %q", raw.Response.Status, "completed")
+	if raw.Response.Status != "incomplete" {
+		t.Fatalf("status = %q, want %q", raw.Response.Status, "incomplete")
 	}
 }
 
@@ -1766,11 +1766,11 @@ func TestDecodeOpenAIResponsesStreamEvent(t *testing.T) {
 				if e.Usage == nil {
 					t.Fatal("Usage is nil")
 				}
-				if e.Usage.InputTokens != 10 {
-					t.Errorf("Usage.InputTokens = %d, want 10", e.Usage.InputTokens)
+				if e.Usage.PromptTokens != 10 {
+					t.Errorf("Usage.PromptTokens = %d, want 10", e.Usage.PromptTokens)
 				}
-				if e.Usage.OutputTokens != 5 {
-					t.Errorf("Usage.OutputTokens = %d, want 5", e.Usage.OutputTokens)
+				if e.Usage.CompletionTokens != 5 {
+					t.Errorf("Usage.CompletionTokens = %d, want 5", e.Usage.CompletionTokens)
 				}
 				if e.StopReason == nil {
 					t.Fatal("StopReason is nil")
@@ -2080,8 +2080,8 @@ func TestEncodeOpenAIResponsesStreamEvent(t *testing.T) {
 			event: &StreamEvent{
 				Type: StreamEventStop,
 				Usage: &Usage{
-					InputTokens:  10,
-					OutputTokens: 5,
+					PromptTokens:  10,
+					CompletionTokens: 5,
 					TotalTokens:  15,
 				},
 			},
@@ -2271,7 +2271,7 @@ func TestOpenAIResponsesResponseRoundTrip(t *testing.T) {
 		Content: []ContentPart{
 			{Type: ContentTypeText, Text: &TextContent{Text: "Hello!"}},
 		},
-		Usage: Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		Usage: Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 	}
 
 	data, err := EncodeOpenAIResponsesResponse(original)
@@ -2296,8 +2296,8 @@ func TestOpenAIResponsesResponseRoundTrip(t *testing.T) {
 	if len(roundTripped.Content) != 1 || roundTripped.Content[0].Text.Text != "Hello!" {
 		t.Errorf("Content = %+v, want text 'Hello!'", roundTripped.Content)
 	}
-	if roundTripped.Usage.InputTokens != 10 {
-		t.Errorf("Usage.InputTokens = %d, want 10", roundTripped.Usage.InputTokens)
+	if roundTripped.Usage.PromptTokens != 10 {
+		t.Errorf("Usage.PromptTokens = %d, want 10", roundTripped.Usage.PromptTokens)
 	}
 }
 
@@ -2513,7 +2513,7 @@ func stopReasonPtr(sr StopReason) *StopReason {
 }
 
 // TestDecodeOpenAIResponsesResponse_ReasoningTokens verifies that reasoning_tokens
-// inside output_tokens_details is mapped to Usage.ThinkingTokens.
+// inside output_tokens_details is mapped to Usage.CompletionReasoningTokens.
 func TestDecodeOpenAIResponsesResponse_ReasoningTokens(t *testing.T) {
 	body := []byte(`{
 		"id": "resp_reasoning",
@@ -2541,17 +2541,17 @@ func TestDecodeOpenAIResponsesResponse_ReasoningTokens(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if resp.Usage.InputTokens != 100 {
-		t.Errorf("Usage.InputTokens = %d, want 100", resp.Usage.InputTokens)
+	if resp.Usage.PromptTokens != 100 {
+		t.Errorf("Usage.PromptTokens = %d, want 100", resp.Usage.PromptTokens)
 	}
-	if resp.Usage.OutputTokens != 200 {
-		t.Errorf("Usage.OutputTokens = %d, want 200", resp.Usage.OutputTokens)
+	if resp.Usage.CompletionTokens != 200 {
+		t.Errorf("Usage.CompletionTokens = %d, want 200", resp.Usage.CompletionTokens)
 	}
 	if resp.Usage.TotalTokens != 300 {
 		t.Errorf("Usage.TotalTokens = %d, want 300", resp.Usage.TotalTokens)
 	}
-	if resp.Usage.ThinkingTokens != 150 {
-		t.Errorf("Usage.ThinkingTokens = %d, want 150 (from reasoning_tokens)", resp.Usage.ThinkingTokens)
+	if resp.Usage.CompletionReasoningTokens != 150 {
+		t.Errorf("Usage.CompletionReasoningTokens = %d, want 150 (from reasoning_tokens)", resp.Usage.CompletionReasoningTokens)
 	}
 }
 
@@ -2588,11 +2588,11 @@ func TestDecodeOpenAIResponsesResponse_CachedAndReasoningTokens(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if resp.Usage.CacheReadTokens != 400 {
-		t.Errorf("Usage.CacheReadTokens = %d, want 400", resp.Usage.CacheReadTokens)
+	if resp.Usage.PromptCacheHitTokens != 400 {
+		t.Errorf("Usage.PromptCacheHitTokens = %d, want 400", resp.Usage.PromptCacheHitTokens)
 	}
-	if resp.Usage.ThinkingTokens != 60 {
-		t.Errorf("Usage.ThinkingTokens = %d, want 60", resp.Usage.ThinkingTokens)
+	if resp.Usage.CompletionReasoningTokens != 60 {
+		t.Errorf("Usage.CompletionReasoningTokens = %d, want 60", resp.Usage.CompletionReasoningTokens)
 	}
 }
 
@@ -2606,10 +2606,10 @@ func TestEncodeOpenAIResponsesResponse_ReasoningTokensRoundTrip(t *testing.T) {
 		StopReason: StopReasonEndTurn,
 		Content:    []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "hi"}}},
 		Usage: Usage{
-			InputTokens:    10,
-			OutputTokens:   20,
+			PromptTokens:    10,
+			CompletionTokens:   20,
 			TotalTokens:    30,
-			ThinkingTokens: 12,
+			CompletionReasoningTokens: 12,
 		},
 	}
 
@@ -2648,8 +2648,8 @@ func TestEncodeOpenAIResponsesResponse_ReasoningTokensRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if decoded.Usage.ThinkingTokens != 12 {
-		t.Errorf("ThinkingTokens round-trip: got %d, want 12", decoded.Usage.ThinkingTokens)
+	if decoded.Usage.CompletionReasoningTokens != 12 {
+		t.Errorf("ThinkingTokens round-trip: got %d, want 12", decoded.Usage.CompletionReasoningTokens)
 	}
 }
 
@@ -2921,7 +2921,7 @@ func TestEncodeOpenAIResponsesResponse_Refusal(t *testing.T) {
 		Content: []ContentPart{
 			{Type: ContentTypeRefusal, Refusal: &RefusalContent{Refusal: "Cannot do that."}},
 		},
-		Usage: Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		Usage: Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 	}
 
 	data, err := EncodeOpenAIResponsesResponse(resp)
@@ -2984,8 +2984,8 @@ func TestDecodeOpenAIResponsesStreamEvent_ResponseFailed(t *testing.T) {
 	if event.Usage == nil {
 		t.Fatal("Usage is nil")
 	}
-	if event.Usage.InputTokens != 10 {
-		t.Errorf("Usage.InputTokens = %d, want 10", event.Usage.InputTokens)
+	if event.Usage.PromptTokens != 10 {
+		t.Errorf("Usage.PromptTokens = %d, want 10", event.Usage.PromptTokens)
 	}
 }
 

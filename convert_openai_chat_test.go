@@ -729,11 +729,11 @@ func TestDecodeOpenAIChatResponse_Basic(t *testing.T) {
 	if resp.Content[0].Text.Text != "Hello!" {
 		t.Errorf("Content[0].Text = %q, want %q", resp.Content[0].Text.Text, "Hello!")
 	}
-	if resp.Usage.InputTokens != 10 {
-		t.Errorf("Usage.InputTokens = %d, want 10", resp.Usage.InputTokens)
+	if resp.Usage.PromptTokens != 10 {
+		t.Errorf("Usage.PromptTokens = %d, want 10", resp.Usage.PromptTokens)
 	}
-	if resp.Usage.OutputTokens != 5 {
-		t.Errorf("Usage.OutputTokens = %d, want 5", resp.Usage.OutputTokens)
+	if resp.Usage.CompletionTokens != 5 {
+		t.Errorf("Usage.CompletionTokens = %d, want 5", resp.Usage.CompletionTokens)
 	}
 	if resp.Usage.TotalTokens != 15 {
 		t.Errorf("Usage.TotalTokens = %d, want 15", resp.Usage.TotalTokens)
@@ -842,8 +842,8 @@ func TestEncodeOpenAIChatResponse_Basic(t *testing.T) {
 			{Type: ContentTypeText, Text: &TextContent{Text: "Hello!"}},
 		},
 		Usage: Usage{
-			InputTokens:  10,
-			OutputTokens: 5,
+			PromptTokens:  10,
+			CompletionTokens: 5,
 			TotalTokens:  15,
 		},
 	}
@@ -874,7 +874,7 @@ func TestEncodeOpenAIChatResponse_Basic(t *testing.T) {
 	}
 	choice := choices[0].(map[string]interface{})
 	if choice["finish_reason"] != "stop" {
-		t.Errorf("finish_reason = %v, want stop", choice["finish_reason"])
+		t.Errorf("finish_reason = %v, want length", choice["finish_reason"])
 	}
 	msg := choice["message"].(map[string]interface{})
 	if msg["role"] != "assistant" {
@@ -908,7 +908,7 @@ func TestEncodeOpenAIChatResponse_ToolCalls(t *testing.T) {
 				},
 			},
 		},
-		Usage: Usage{InputTokens: 20, OutputTokens: 10, TotalTokens: 30},
+		Usage: Usage{PromptTokens: 20, CompletionTokens: 10, TotalTokens: 30},
 	}
 
 	data, err := EncodeOpenAIChatResponse(resp)
@@ -945,7 +945,7 @@ func TestEncodeOpenAIChatResponse_ToolCalls(t *testing.T) {
 	}
 }
 
-func TestEncodeOpenAIChatResponse_PauseTurnDowngradesToStop(t *testing.T) {
+func TestEncodeOpenAIChatResponse_PauseTurnMapsToLength(t *testing.T) {
 	resp := &Response{
 		ID:         "chatcmpl-pause",
 		Model:      "gpt-4o",
@@ -967,12 +967,12 @@ func TestEncodeOpenAIChatResponse_PauseTurnDowngradesToStop(t *testing.T) {
 
 	choices := raw["choices"].([]interface{})
 	choice := choices[0].(map[string]interface{})
-	if choice["finish_reason"] != "stop" {
-		t.Fatalf("finish_reason = %v, want stop", choice["finish_reason"])
+	if choice["finish_reason"] != "length" {
+		t.Fatalf("finish_reason = %v, want length", choice["finish_reason"])
 	}
 }
 
-func TestEncodeOpenAIChatStreamChunk_PauseTurnDowngradesToStop(t *testing.T) {
+func TestEncodeOpenAIChatStreamChunk_PauseTurnMapsToLength(t *testing.T) {
 	stopReason := StopReasonPauseTurn
 	event := &StreamEvent{
 		Type:       StreamEventStop,
@@ -991,8 +991,8 @@ func TestEncodeOpenAIChatStreamChunk_PauseTurnDowngradesToStop(t *testing.T) {
 
 	choices := raw["choices"].([]interface{})
 	choice := choices[0].(map[string]interface{})
-	if choice["finish_reason"] != "stop" {
-		t.Fatalf("finish_reason = %v, want stop", choice["finish_reason"])
+	if choice["finish_reason"] != "length" {
+		t.Fatalf("finish_reason = %v, want length", choice["finish_reason"])
 	}
 }
 
@@ -1146,7 +1146,7 @@ func TestEncodeOpenAIChatStreamChunk_Text(t *testing.T) {
 	choices = raw["choices"].([]interface{})
 	choice = choices[0].(map[string]interface{})
 	if choice["finish_reason"] != "stop" {
-		t.Errorf("finish_reason = %v, want stop", choice["finish_reason"])
+		t.Errorf("finish_reason = %v, want length", choice["finish_reason"])
 	}
 }
 
@@ -1305,8 +1305,8 @@ func TestOpenAIChatResponseRoundTrip(t *testing.T) {
 			{Type: ContentTypeText, Text: &TextContent{Text: "Hello world!"}},
 		},
 		Usage: Usage{
-			InputTokens:  10,
-			OutputTokens: 5,
+			PromptTokens:  10,
+			CompletionTokens: 5,
 			TotalTokens:  15,
 		},
 	}
@@ -1339,11 +1339,11 @@ func TestOpenAIChatResponseRoundTrip(t *testing.T) {
 	if decoded.Content[0].Text.Text != "Hello world!" {
 		t.Errorf("Content[0].Text = %q, want %q", decoded.Content[0].Text.Text, "Hello world!")
 	}
-	if decoded.Usage.InputTokens != original.Usage.InputTokens {
-		t.Errorf("Usage.InputTokens = %d, want %d", decoded.Usage.InputTokens, original.Usage.InputTokens)
+	if decoded.Usage.PromptTokens != original.Usage.PromptTokens {
+		t.Errorf("Usage.PromptTokens = %d, want %d", decoded.Usage.PromptTokens, original.Usage.PromptTokens)
 	}
-	if decoded.Usage.OutputTokens != original.Usage.OutputTokens {
-		t.Errorf("Usage.OutputTokens = %d, want %d", decoded.Usage.OutputTokens, original.Usage.OutputTokens)
+	if decoded.Usage.CompletionTokens != original.Usage.CompletionTokens {
+		t.Errorf("Usage.CompletionTokens = %d, want %d", decoded.Usage.CompletionTokens, original.Usage.CompletionTokens)
 	}
 	if decoded.Usage.TotalTokens != original.Usage.TotalTokens {
 		t.Errorf("Usage.TotalTokens = %d, want %d", decoded.Usage.TotalTokens, original.Usage.TotalTokens)
@@ -1365,7 +1365,7 @@ func TestOpenAIChatResponseRoundTrip_ToolCalls(t *testing.T) {
 				},
 			},
 		},
-		Usage: Usage{InputTokens: 5, OutputTokens: 3, TotalTokens: 8},
+		Usage: Usage{PromptTokens: 5, CompletionTokens: 3, TotalTokens: 8},
 	}
 
 	data, err := EncodeOpenAIChatResponse(original)
@@ -1408,11 +1408,11 @@ func TestDecodeOpenAIChatStreamChunk_UsageOnly(t *testing.T) {
 	if event.Usage == nil {
 		t.Fatal("Usage is nil")
 	}
-	if event.Usage.InputTokens != 10 {
-		t.Errorf("Usage.InputTokens = %d, want 10", event.Usage.InputTokens)
+	if event.Usage.PromptTokens != 10 {
+		t.Errorf("Usage.PromptTokens = %d, want 10", event.Usage.PromptTokens)
 	}
-	if event.Usage.OutputTokens != 5 {
-		t.Errorf("Usage.OutputTokens = %d, want 5", event.Usage.OutputTokens)
+	if event.Usage.CompletionTokens != 5 {
+		t.Errorf("Usage.CompletionTokens = %d, want 5", event.Usage.CompletionTokens)
 	}
 }
 
@@ -1422,8 +1422,8 @@ func TestEncodeOpenAIChatStreamChunk_StopWithUsage(t *testing.T) {
 		Type:       StreamEventStop,
 		StopReason: &stopReason,
 		Usage: &Usage{
-			InputTokens:  10,
-			OutputTokens: 5,
+			PromptTokens:  10,
+			CompletionTokens: 5,
 			TotalTokens:  15,
 		},
 	}
@@ -1441,7 +1441,7 @@ func TestEncodeOpenAIChatStreamChunk_StopWithUsage(t *testing.T) {
 	choices := raw["choices"].([]interface{})
 	choice := choices[0].(map[string]interface{})
 	if choice["finish_reason"] != "stop" {
-		t.Errorf("finish_reason = %v, want stop", choice["finish_reason"])
+		t.Errorf("finish_reason = %v, want length", choice["finish_reason"])
 	}
 
 	usage := raw["usage"].(map[string]interface{})
@@ -1724,7 +1724,7 @@ func TestAnthropicToOpenAIChat_MixedToolResult(t *testing.T) {
 }
 
 // TestDecodeOpenAIChatResponse_ReasoningTokens verifies that reasoning_tokens
-// inside completion_tokens_details is mapped to Usage.ThinkingTokens.
+// inside completion_tokens_details is mapped to Usage.CompletionReasoningTokens.
 func TestDecodeOpenAIChatResponse_ReasoningTokens(t *testing.T) {
 	body := []byte(`{
 		"id": "chatcmpl-reasoning",
@@ -1749,17 +1749,17 @@ func TestDecodeOpenAIChatResponse_ReasoningTokens(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if resp.Usage.InputTokens != 100 {
-		t.Errorf("Usage.InputTokens = %d, want 100", resp.Usage.InputTokens)
+	if resp.Usage.PromptTokens != 100 {
+		t.Errorf("Usage.PromptTokens = %d, want 100", resp.Usage.PromptTokens)
 	}
-	if resp.Usage.OutputTokens != 200 {
-		t.Errorf("Usage.OutputTokens = %d, want 200", resp.Usage.OutputTokens)
+	if resp.Usage.CompletionTokens != 200 {
+		t.Errorf("Usage.CompletionTokens = %d, want 200", resp.Usage.CompletionTokens)
 	}
 	if resp.Usage.TotalTokens != 300 {
 		t.Errorf("Usage.TotalTokens = %d, want 300", resp.Usage.TotalTokens)
 	}
-	if resp.Usage.ThinkingTokens != 150 {
-		t.Errorf("Usage.ThinkingTokens = %d, want 150 (from reasoning_tokens)", resp.Usage.ThinkingTokens)
+	if resp.Usage.CompletionReasoningTokens != 150 {
+		t.Errorf("Usage.CompletionReasoningTokens = %d, want 150 (from reasoning_tokens)", resp.Usage.CompletionReasoningTokens)
 	}
 }
 
@@ -1793,11 +1793,11 @@ func TestDecodeOpenAIChatResponse_CachedAndReasoningTokens(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if resp.Usage.CacheReadTokens != 400 {
-		t.Errorf("Usage.CacheReadTokens = %d, want 400", resp.Usage.CacheReadTokens)
+	if resp.Usage.PromptCacheHitTokens != 400 {
+		t.Errorf("Usage.PromptCacheHitTokens = %d, want 400", resp.Usage.PromptCacheHitTokens)
 	}
-	if resp.Usage.ThinkingTokens != 60 {
-		t.Errorf("Usage.ThinkingTokens = %d, want 60", resp.Usage.ThinkingTokens)
+	if resp.Usage.CompletionReasoningTokens != 60 {
+		t.Errorf("Usage.CompletionReasoningTokens = %d, want 60", resp.Usage.CompletionReasoningTokens)
 	}
 }
 
@@ -1811,10 +1811,10 @@ func TestEncodeOpenAIChatResponse_ReasoningTokensRoundTrip(t *testing.T) {
 		StopReason: StopReasonEndTurn,
 		Content:    []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "hi"}}},
 		Usage: Usage{
-			InputTokens:    10,
-			OutputTokens:   20,
+			PromptTokens:    10,
+			CompletionTokens:   20,
 			TotalTokens:    30,
-			ThinkingTokens: 12,
+			CompletionReasoningTokens: 12,
 		},
 	}
 
@@ -1853,8 +1853,8 @@ func TestEncodeOpenAIChatResponse_ReasoningTokensRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if decoded.Usage.ThinkingTokens != 12 {
-		t.Errorf("ThinkingTokens round-trip: got %d, want 12", decoded.Usage.ThinkingTokens)
+	if decoded.Usage.CompletionReasoningTokens != 12 {
+		t.Errorf("ThinkingTokens round-trip: got %d, want 12", decoded.Usage.CompletionReasoningTokens)
 	}
 }
 
@@ -2270,7 +2270,7 @@ func TestEncodeOpenAIChatResponse_Refusal(t *testing.T) {
 		Content: []ContentPart{
 			{Type: ContentTypeRefusal, Refusal: &RefusalContent{Refusal: "I cannot help with that."}},
 		},
-		Usage: Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		Usage: Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 	}
 
 	data, err := EncodeOpenAIChatResponse(resp)

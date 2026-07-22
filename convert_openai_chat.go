@@ -39,7 +39,7 @@ func encodeOpenAIChatFinishReason(r StopReason) string {
 	case StopReasonStopSequence:
 		return "stop"
 	case StopReasonPauseTurn:
-		return "stop"
+		return "length"
 	default:
 		return string(r)
 	}
@@ -47,30 +47,42 @@ func encodeOpenAIChatFinishReason(r StopReason) string {
 
 func decodeOpenAIChatUsage(u *openaichat.ChatUsage) Usage {
 	usage := Usage{
-		InputTokens:  u.PromptTokens,
-		OutputTokens: u.CompletionTokens,
-		TotalTokens:  u.TotalTokens,
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
 	}
 	if u.PromptTokensDetails != nil {
-		usage.CacheReadTokens = u.PromptTokensDetails.CachedTokens
+		usage.PromptCacheHitTokens = u.PromptTokensDetails.CachedTokens
+		usage.PromptAudioTokens = u.PromptTokensDetails.AudioTokens
 	}
 	if u.CompletionTokensDetails != nil {
-		usage.ThinkingTokens = u.CompletionTokensDetails.ReasoningTokens
+		usage.CompletionReasoningTokens = u.CompletionTokensDetails.ReasoningTokens
+		usage.CompletionAudioTokens = u.CompletionTokensDetails.AudioTokens
+		usage.CompletionAcceptedPrediction = u.CompletionTokensDetails.AcceptedPredictionTokens
+		usage.CompletionRejectedPrediction = u.CompletionTokensDetails.RejectedPredictionTokens
 	}
 	return usage
 }
 
 func encodeOpenAIChatUsage(u *Usage) *openaichat.ChatUsage {
 	raw := &openaichat.ChatUsage{
-		PromptTokens:     u.InputTokens,
-		CompletionTokens: u.OutputTokens,
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
 		TotalTokens:      u.TotalTokens,
 	}
-	if u.CacheReadTokens != 0 {
-		raw.PromptTokensDetails = &openaichat.ChatPromptDetails{CachedTokens: u.CacheReadTokens}
+	if u.PromptCacheHitTokens != 0 || u.PromptAudioTokens != 0 {
+		raw.PromptTokensDetails = &openaichat.ChatPromptDetails{
+			CachedTokens: u.PromptCacheHitTokens,
+			AudioTokens:  u.PromptAudioTokens,
+		}
 	}
-	if u.ThinkingTokens != 0 {
-		raw.CompletionTokensDetails = &openaichat.ChatCompletionDetails{ReasoningTokens: u.ThinkingTokens}
+	if u.CompletionReasoningTokens != 0 || u.CompletionAudioTokens != 0 || u.CompletionAcceptedPrediction != 0 || u.CompletionRejectedPrediction != 0 {
+		raw.CompletionTokensDetails = &openaichat.ChatCompletionDetails{
+			ReasoningTokens:          u.CompletionReasoningTokens,
+			AudioTokens:              u.CompletionAudioTokens,
+			AcceptedPredictionTokens: u.CompletionAcceptedPrediction,
+			RejectedPredictionTokens: u.CompletionRejectedPrediction,
+		}
 	}
 	return raw
 }
@@ -771,8 +783,9 @@ func DecodeOpenAIChatResponse(body []byte) (*Response, error) {
 			// Refusal content
 			if choice.Message.Refusal != nil && *choice.Message.Refusal != "" {
 				resp.Content = append(resp.Content, ContentPart{
-					Type:    ContentTypeRefusal,
-					Refusal: &RefusalContent{Refusal: *choice.Message.Refusal},
+					Type:      ContentTypeRefusal,
+					Refusal:   &RefusalContent{Refusal: *choice.Message.Refusal},
+					SourceType: ContentTypeRefusal,
 				})
 			}
 
@@ -942,8 +955,9 @@ func DecodeOpenAIChatStreamChunk(data []byte) (*StreamEvent, error) {
 		return &StreamEvent{
 			Type: StreamEventDelta,
 			Delta: &ContentPart{
-				Type:    ContentTypeRefusal,
-				Refusal: &RefusalContent{Refusal: *delta.Refusal},
+				Type:      ContentTypeRefusal,
+				Refusal:   &RefusalContent{Refusal: *delta.Refusal},
+				SourceType: ContentTypeRefusal,
 			},
 		}, nil
 	}

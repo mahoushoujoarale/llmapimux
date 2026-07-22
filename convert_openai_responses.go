@@ -11,30 +11,30 @@ import (
 
 func decodeOaiRespUsage(u *openairesponses.Usage) Usage {
 	usage := Usage{
-		InputTokens:  u.InputTokens,
-		OutputTokens: u.OutputTokens,
-		TotalTokens:  u.TotalTokens,
+		PromptTokens:     u.InputTokens,
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      u.TotalTokens,
 	}
 	if u.InputTokensDetails != nil {
-		usage.CacheReadTokens = u.InputTokensDetails.CachedTokens
+		usage.PromptCacheHitTokens = u.InputTokensDetails.CachedTokens
 	}
 	if u.OutputTokensDetails != nil {
-		usage.ThinkingTokens = u.OutputTokensDetails.ReasoningTokens
+		usage.CompletionReasoningTokens = u.OutputTokensDetails.ReasoningTokens
 	}
 	return usage
 }
 
 func encodeOaiRespUsage(u *Usage) *openairesponses.Usage {
 	raw := &openairesponses.Usage{
-		InputTokens:  u.InputTokens,
-		OutputTokens: u.OutputTokens,
+		InputTokens:  u.PromptTokens,
+		OutputTokens: u.CompletionTokens,
 		TotalTokens:  u.TotalTokens,
 	}
-	if u.CacheReadTokens != 0 {
-		raw.InputTokensDetails = &openairesponses.InputDetails{CachedTokens: u.CacheReadTokens}
+	if u.PromptCacheHitTokens != 0 {
+		raw.InputTokensDetails = &openairesponses.InputDetails{CachedTokens: u.PromptCacheHitTokens}
 	}
-	if u.ThinkingTokens != 0 {
-		raw.OutputTokensDetails = &openairesponses.OutputDetails{ReasoningTokens: u.ThinkingTokens}
+	if u.CompletionReasoningTokens != 0 {
+		raw.OutputTokensDetails = &openairesponses.OutputDetails{ReasoningTokens: u.CompletionReasoningTokens}
 	}
 	return raw
 }
@@ -989,8 +989,9 @@ func DecodeOpenAIResponsesResponse(body []byte) (*Response, error) {
 					resp.Content = append(resp.Content, textPart)
 				case "refusal":
 					resp.Content = append(resp.Content, ContentPart{
-						Type:    ContentTypeRefusal,
-						Refusal: &RefusalContent{Refusal: c.Refusal},
+						Type:      ContentTypeRefusal,
+						Refusal:   &RefusalContent{Refusal: c.Refusal},
+						SourceType: ContentTypeRefusal,
 					})
 				}
 			}
@@ -1100,7 +1101,7 @@ func EncodeOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 	case StopReasonContentFilter:
 		raw.Status = "failed"
 	case StopReasonPauseTurn:
-		raw.Status = "completed"
+		raw.Status = "incomplete"
 	default:
 		if resp.StopReason != "" {
 			raw.Status = string(resp.StopReason)
@@ -1339,8 +1340,9 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) ([]*StreamE
 			Type:  StreamEventDelta,
 			Index: derefIntPtr(raw.OutputIndex),
 			Delta: &ContentPart{
-				Type:    ContentTypeRefusal,
-				Refusal: &RefusalContent{Refusal: raw.Delta},
+				Type:       ContentTypeRefusal,
+				Refusal:    &RefusalContent{Refusal: raw.Delta},
+				SourceType: ContentTypeRefusal,
 			},
 		}}, nil
 
@@ -1479,6 +1481,8 @@ func EncodeOpenAIResponsesStreamEvent(event *StreamEvent) (string, []byte, error
 		if event.StopReason != nil {
 			switch *event.StopReason {
 			case StopReasonMaxTokens:
+				resp.Status = "incomplete"
+			case StopReasonPauseTurn:
 				resp.Status = "incomplete"
 			case StopReasonContentFilter:
 				resp.Status = "failed"
