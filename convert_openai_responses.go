@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/llmapimux/llmapimux/protocol/openairesponses"
+	"github.com/mahoushoujoarale/llmapimux/protocol/openairesponses"
 )
 
 func decodeOaiRespUsage(u *openairesponses.Usage) Usage {

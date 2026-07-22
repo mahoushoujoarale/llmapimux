@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/llmapimux/llmapimux/protocol/openairesponses"
+	"github.com/mahoushoujoarale/llmapimux/protocol/openairesponses"
 )
 
 // firstStreamEvent returns the first IR event from a multi-event decode, or nil

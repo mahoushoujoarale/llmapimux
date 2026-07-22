@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	llmapimux "github.com/llmapimux/llmapimux"
+	llmapimux "github.com/mahoushoujoarale/llmapimux"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	anthropicopt "github.com/anthropics/anthropic-sdk-go/option"

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strconv"
 
-	anthropic "github.com/llmapimux/llmapimux/protocol/anthropic"
+	anthropic "github.com/mahoushoujoarale/llmapimux/protocol/anthropic"
 )
 
 // decodeAnthropicStopReason maps an Anthropic wire stop_reason string to an IR StopReason.

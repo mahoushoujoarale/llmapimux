@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	llmapimux "github.com/llmapimux/llmapimux"
+	llmapimux "github.com/mahoushoujoarale/llmapimux"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"

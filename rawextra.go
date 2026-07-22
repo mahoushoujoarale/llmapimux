@@ -6,10 +6,10 @@ import (
 	"reflect"
 	"strings"
 
-	anthropic "github.com/llmapimux/llmapimux/protocol/anthropic"
-	gemini "github.com/llmapimux/llmapimux/protocol/gemini"
-	"github.com/llmapimux/llmapimux/protocol/openaichat"
-	"github.com/llmapimux/llmapimux/protocol/openairesponses"
+	anthropic "github.com/mahoushoujoarale/llmapimux/protocol/anthropic"
+	gemini "github.com/mahoushoujoarale/llmapimux/protocol/gemini"
+	"github.com/mahoushoujoarale/llmapimux/protocol/openaichat"
+	"github.com/mahoushoujoarale/llmapimux/protocol/openairesponses"
 )
 
 // jsonFieldNames extracts JSON field names from a struct type's tags.

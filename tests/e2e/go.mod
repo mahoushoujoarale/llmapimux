@@ -1,10 +1,10 @@
-module github.com/llmapimux/llmapimux/tests/e2e
+module github.com/mahoushoujoarale/llmapimux/tests/e2e
 
 go 1.26.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.26.0
-	github.com/llmapimux/llmapimux v0.0.0
+	github.com/mahoushoujoarale/llmapimux v0.0.0
 	github.com/openai/openai-go/v3 v3.26.0
 	google.golang.org/genai v1.50.0
 )
@@ -33,4 +33,4 @@ require (
 	google.golang.org/protobuf v1.34.2 // indirect
 )
 
-replace github.com/llmapimux/llmapimux => ../..
+replace github.com/mahoushoujoarale/llmapimux => ../..

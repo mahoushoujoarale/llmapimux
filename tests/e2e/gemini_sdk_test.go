@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	llmapimux "github.com/llmapimux/llmapimux"
+	llmapimux "github.com/mahoushoujoarale/llmapimux"
 
 	"google.golang.org/genai"
 )

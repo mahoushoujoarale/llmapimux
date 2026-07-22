@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	gemini "github.com/llmapimux/llmapimux/protocol/gemini"
+	gemini "github.com/mahoushoujoarale/llmapimux/protocol/gemini"
 )
 
 func TestDecodeGeminiRequest_Basic(t *testing.T) {

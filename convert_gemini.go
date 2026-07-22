@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	gemini "github.com/llmapimux/llmapimux/protocol/gemini"
+	gemini "github.com/mahoushoujoarale/llmapimux/protocol/gemini"
 )
 
 // --- Private intermediate structs for Gemini GenerateContent JSON ---

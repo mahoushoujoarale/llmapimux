@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/llmapimux/llmapimux/protocol/openaichat"
+	"github.com/mahoushoujoarale/llmapimux/protocol/openaichat"
 )
 
 // decodeOpenAIChatFinishReason maps an OpenAI Chat finish_reason string to an IR StopReason.

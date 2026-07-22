@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	llmapimux "github.com/llmapimux/llmapimux"
+	llmapimux "github.com/mahoushoujoarale/llmapimux"
 )
 
 type e2eCapturedRequest struct {

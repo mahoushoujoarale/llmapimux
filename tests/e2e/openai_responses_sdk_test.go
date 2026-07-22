@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	llmapimux "github.com/llmapimux/llmapimux"
+	llmapimux "github.com/mahoushoujoarale/llmapimux"
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/llmapimux/llmapimux/protocol/openaichat"
+	"github.com/mahoushoujoarale/llmapimux/protocol/openaichat"
 )
 
 func TestDecodeOpenAIChatRequest_Basic(t *testing.T) {
