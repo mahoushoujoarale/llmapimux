@@ -432,7 +432,7 @@ func TestHandler_NonStreaming_EmitsStatsLifecycle(t *testing.T) {
 	if complete.IRResponse == nil {
 		t.Fatal("complete.IRResponse is nil")
 	}
-	if complete.Usage.TotalTokens != 8 || complete.Usage.InputTokens != 5 || complete.Usage.OutputTokens != 3 {
+	if complete.Usage.TotalTokens != 8 || complete.Usage.PromptTokens != 5 || complete.Usage.CompletionTokens != 3 {
 		t.Fatalf("usage = %+v, want input=5 output=3 total=8", complete.Usage)
 	}
 	if complete.StopReason != StopReasonEndTurn {
@@ -471,8 +471,8 @@ func TestHandler_NonStreaming_EmitsStatsLifecycle(t *testing.T) {
 	if complete.TotalLatency <= 0 {
 		t.Fatalf("total latency = %v, want > 0", complete.TotalLatency)
 	}
-	if complete.TotalLatency > 0 && complete.Usage.OutputTokens > 0 {
-		expectedMin := float64(complete.Usage.OutputTokens) / complete.TotalLatency.Seconds()
+	if complete.TotalLatency > 0 && complete.Usage.CompletionTokens > 0 {
+		expectedMin := float64(complete.Usage.CompletionTokens) / complete.TotalLatency.Seconds()
 		if complete.OutputThroughput <= 0 || complete.OutputThroughput > expectedMin*1.5+1 {
 			t.Fatalf("output throughput = %v looks invalid, expected roughly %v", complete.OutputThroughput, expectedMin)
 		}
@@ -543,8 +543,8 @@ func TestHandler_Streaming_EmitsStatsLifecycle(t *testing.T) {
 	events := []*StreamEvent{
 		{Type: StreamEventStart, Response: &Response{ID: "chatcmpl-1", Model: "gpt-4o-mini"}},
 		{Type: StreamEventDelta, Delta: &ContentPart{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}}},
-		{Type: StreamEventDelta, Usage: &Usage{InputTokens: 5, OutputTokens: 2, TotalTokens: 7}},
-		{Type: StreamEventStop, StopReason: &stopReason, Usage: &Usage{InputTokens: 5, OutputTokens: 3, TotalTokens: 8}},
+		{Type: StreamEventDelta, Usage: &Usage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7}},
+		{Type: StreamEventStop, StopReason: &stopReason, Usage: &Usage{PromptTokens: 5, CompletionTokens: 3, TotalTokens: 8}},
 	}
 
 	w, reporter := runStreamingRequestWithOpenAIChatUpstream(t, events)
@@ -606,7 +606,7 @@ func TestHandler_Streaming_EmitsStatsLifecycle(t *testing.T) {
 	if complete.IRResponse != nil {
 		t.Fatal("complete.IRResponse should be nil for streaming")
 	}
-	if complete.Usage.InputTokens != 5 || complete.Usage.OutputTokens != 3 || complete.Usage.TotalTokens != 8 {
+	if complete.Usage.PromptTokens != 5 || complete.Usage.CompletionTokens != 3 || complete.Usage.TotalTokens != 8 {
 		t.Fatalf("complete usage = %+v, want input=5 output=3 total=8", complete.Usage)
 	}
 	if complete.StopReason != StopReasonEndTurn {

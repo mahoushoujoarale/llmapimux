@@ -416,7 +416,11 @@ func (s *retryLoopState) handleNonStreaming(resp *Response, firstByteTime time.T
 		}
 		throughput := 0.0
 		if totalLatency > 0 {
-			throughput = float64(usage.OutputTokens) / totalLatency.Seconds()
+			throughput = float64(usage.CompletionTokens) / totalLatency.Seconds()
+		}
+		tpot := time.Duration(0)
+		if usage.CompletionTokens > 0 && totalLatency > ttfb {
+			tpot = (totalLatency - ttfb) / time.Duration(usage.CompletionTokens)
 		}
 		s.stats.OnComplete(s.r.Context(), CompleteEvent{
 			RequestID:        s.info.RequestID,
@@ -429,6 +433,7 @@ func (s *retryLoopState) handleNonStreaming(resp *Response, firstByteTime time.T
 			TotalLatency:     totalLatency,
 			Usage:            usage,
 			OutputThroughput: throughput,
+			TPOT:             tpot,
 			StopReason:       stopReason,
 			ActualModel:      actualModel,
 			IRResponse:       resp,
@@ -475,6 +480,7 @@ type streamSummary struct {
 	stopReason  StopReason
 	actualModel string
 	streamErr   error
+	chunks      int
 }
 
 func (s *retryLoopState) wrapStreamForStats(ch <-chan StreamResult) (<-chan StreamResult, <-chan streamSummary, chan struct{}) {
@@ -540,6 +546,7 @@ func (s *retryLoopState) wrapStreamForStats(ch <-chan StreamResult) (<-chan Stre
 				}
 
 				seq++
+				summary.chunks++
 				interChunkDelay := time.Duration(0)
 				if seq > 1 {
 					interChunkDelay = now.Sub(lastChunkTime)
@@ -602,7 +609,11 @@ func (s *retryLoopState) handleStreaming(ch <-chan StreamResult) {
 	totalLatency := now.Sub(s.startTime)
 	throughput := 0.0
 	if totalLatency > 0 {
-		throughput = float64(summary.usage.OutputTokens) / totalLatency.Seconds()
+		throughput = float64(summary.usage.CompletionTokens) / totalLatency.Seconds()
+	}
+	tpot := time.Duration(0)
+	if summary.usage.CompletionTokens > 0 && totalLatency > summary.ttfb {
+		tpot = (totalLatency - summary.ttfb) / time.Duration(summary.usage.CompletionTokens)
 	}
 
 	s.stats.OnComplete(s.r.Context(), CompleteEvent{
@@ -616,6 +627,8 @@ func (s *retryLoopState) handleStreaming(ch <-chan StreamResult) {
 		TotalLatency:     totalLatency,
 		Usage:            summary.usage,
 		OutputThroughput: throughput,
+		TPOT:             tpot,
+		Chunks:           summary.chunks,
 		StopReason:       summary.stopReason,
 		ActualModel:      summary.actualModel,
 		IRResponse:       nil,
@@ -627,24 +640,39 @@ func (s *retryLoopState) handleStreaming(ch <-chan StreamResult) {
 
 // mergeStreamUsage merges non-zero fields from src into dst.
 // This handles protocols like Anthropic where usage is split across
-// multiple streaming events (message_start has InputTokens, message_delta has OutputTokens).
+// multiple streaming events (message_start has input tokens, message_delta has output tokens).
 func mergeStreamUsage(dst *Usage, src *Usage) {
-	if src.InputTokens != 0 {
-		dst.InputTokens = src.InputTokens
+	if src.PromptTokens != 0 {
+		dst.PromptTokens = src.PromptTokens
 	}
-	if src.OutputTokens != 0 {
-		dst.OutputTokens = src.OutputTokens
+	if src.PromptCacheHitTokens != 0 {
+		dst.PromptCacheHitTokens = src.PromptCacheHitTokens
+	}
+	if src.PromptCacheWriteTokens != 0 {
+		dst.PromptCacheWriteTokens = src.PromptCacheWriteTokens
+	}
+	if src.PromptAudioTokens != 0 {
+		dst.PromptAudioTokens = src.PromptAudioTokens
+	}
+	if src.CompletionTokens != 0 {
+		dst.CompletionTokens = src.CompletionTokens
+	}
+	if src.CompletionReasoningTokens != 0 {
+		dst.CompletionReasoningTokens = src.CompletionReasoningTokens
+	}
+	if src.CompletionAudioTokens != 0 {
+		dst.CompletionAudioTokens = src.CompletionAudioTokens
+	}
+	if src.CompletionAcceptedPrediction != 0 {
+		dst.CompletionAcceptedPrediction = src.CompletionAcceptedPrediction
+	}
+	if src.CompletionRejectedPrediction != 0 {
+		dst.CompletionRejectedPrediction = src.CompletionRejectedPrediction
+	}
+	if src.ServerToolUseTokens != 0 {
+		dst.ServerToolUseTokens = src.ServerToolUseTokens
 	}
 	if src.TotalTokens != 0 {
 		dst.TotalTokens = src.TotalTokens
-	}
-	if src.CacheReadTokens != 0 {
-		dst.CacheReadTokens = src.CacheReadTokens
-	}
-	if src.CacheCreationTokens != 0 {
-		dst.CacheCreationTokens = src.CacheCreationTokens
-	}
-	if src.ThinkingTokens != 0 {
-		dst.ThinkingTokens = src.ThinkingTokens
 	}
 }

@@ -51,11 +51,11 @@ func TestGeminiClient_Send(t *testing.T) {
 	if resp.StopReason != StopReasonEndTurn {
 		t.Errorf("stop_reason = %q, want end_turn", resp.StopReason)
 	}
-	if resp.Usage.InputTokens != 10 {
-		t.Errorf("input_tokens = %d, want 10", resp.Usage.InputTokens)
+	if resp.Usage.PromptTokens != 10 {
+		t.Errorf("input_tokens = %d, want 10", resp.Usage.PromptTokens)
 	}
-	if resp.Usage.OutputTokens != 5 {
-		t.Errorf("output_tokens = %d, want 5", resp.Usage.OutputTokens)
+	if resp.Usage.CompletionTokens != 5 {
+		t.Errorf("output_tokens = %d, want 5", resp.Usage.CompletionTokens)
 	}
 	if len(resp.Content) == 0 {
 		t.Fatal("expected non-empty content")

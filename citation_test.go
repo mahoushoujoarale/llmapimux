@@ -504,7 +504,7 @@ func TestEncodeGeminiResponse_CitationsDropped(t *testing.T) {
 				},
 			},
 		},
-		Usage: Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		Usage: Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 	}
 
 	encoded, err := EncodeGeminiResponse(resp)
@@ -784,7 +784,7 @@ func TestEncodeOpenAIChatResponse_Annotations(t *testing.T) {
 				},
 			},
 		},
-		Usage: Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		Usage: Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 	}
 
 	encoded, err := EncodeOpenAIChatResponse(resp)
@@ -828,7 +828,7 @@ func TestEncodeOpenAIResponsesResponse_Annotations(t *testing.T) {
 				},
 			},
 		},
-		Usage: Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		Usage: Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 	}
 
 	encoded, err := EncodeOpenAIResponsesResponse(resp)

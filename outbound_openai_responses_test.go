@@ -47,11 +47,11 @@ func TestOpenAIResponsesClient_Send(t *testing.T) {
 	if resp.StopReason != StopReasonEndTurn {
 		t.Errorf("stop_reason = %q", resp.StopReason)
 	}
-	if resp.Usage.InputTokens != 10 {
-		t.Errorf("input_tokens = %d", resp.Usage.InputTokens)
+	if resp.Usage.PromptTokens != 10 {
+		t.Errorf("input_tokens = %d", resp.Usage.PromptTokens)
 	}
-	if resp.Usage.OutputTokens != 5 {
-		t.Errorf("output_tokens = %d", resp.Usage.OutputTokens)
+	if resp.Usage.CompletionTokens != 5 {
+		t.Errorf("output_tokens = %d", resp.Usage.CompletionTokens)
 	}
 	if resp.Usage.TotalTokens != 15 {
 		t.Errorf("total_tokens = %d", resp.Usage.TotalTokens)

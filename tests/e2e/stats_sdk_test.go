@@ -516,23 +516,23 @@ func doStreamingRequest(t *testing.T, inProto llmapimux.Protocol, muxURL, upstre
 // ---------- Expected usage per outbound protocol ----------
 
 type expectedUsage struct {
-	InputTokens         int
-	OutputTokens        int
-	TotalTokens         int
-	CacheReadTokens     int
-	CacheCreationTokens int
+	PromptTokens          int
+	CompletionTokens      int
+	TotalTokens           int
+	PromptCacheHitTokens  int
+	PromptCacheWriteTokens int
 }
 
 func expectedUsageForOutbound(proto llmapimux.Protocol) expectedUsage {
 	switch proto {
 	case llmapimux.ProtocolOpenAIChat:
-		return expectedUsage{InputTokens: 100, OutputTokens: 25, TotalTokens: 125}
+		return expectedUsage{PromptTokens: 100, CompletionTokens: 25, TotalTokens: 125}
 	case llmapimux.ProtocolAnthropic:
-		return expectedUsage{InputTokens: 100, OutputTokens: 25, CacheReadTokens: 30, CacheCreationTokens: 10}
+		return expectedUsage{PromptTokens: 140, CompletionTokens: 25, PromptCacheHitTokens: 30, PromptCacheWriteTokens: 10}
 	case llmapimux.ProtocolGemini:
-		return expectedUsage{InputTokens: 100, OutputTokens: 25, TotalTokens: 125}
+		return expectedUsage{PromptTokens: 100, CompletionTokens: 25, TotalTokens: 125}
 	case llmapimux.ProtocolOpenAIResponses:
-		return expectedUsage{InputTokens: 100, OutputTokens: 25, TotalTokens: 125}
+		return expectedUsage{PromptTokens: 100, CompletionTokens: 25, TotalTokens: 125}
 	default:
 		return expectedUsage{}
 	}
@@ -605,20 +605,20 @@ func TestE2E_Stats_NonStreaming(t *testing.T) {
 
 				// Verify usage
 				exp := expectedUsageForOutbound(out.protocol)
-				if ce.Usage.InputTokens != exp.InputTokens {
-					t.Fatalf("Usage.InputTokens = %d, want %d", ce.Usage.InputTokens, exp.InputTokens)
+				if ce.Usage.PromptTokens != exp.PromptTokens {
+					t.Fatalf("Usage.PromptTokens = %d, want %d", ce.Usage.PromptTokens, exp.PromptTokens)
 				}
-				if ce.Usage.OutputTokens != exp.OutputTokens {
-					t.Fatalf("Usage.OutputTokens = %d, want %d", ce.Usage.OutputTokens, exp.OutputTokens)
+				if ce.Usage.CompletionTokens != exp.CompletionTokens {
+					t.Fatalf("Usage.CompletionTokens = %d, want %d", ce.Usage.CompletionTokens, exp.CompletionTokens)
 				}
 				if exp.TotalTokens > 0 && ce.Usage.TotalTokens != exp.TotalTokens {
 					t.Fatalf("Usage.TotalTokens = %d, want %d", ce.Usage.TotalTokens, exp.TotalTokens)
 				}
-				if exp.CacheReadTokens > 0 && ce.Usage.CacheReadTokens != exp.CacheReadTokens {
-					t.Fatalf("Usage.CacheReadTokens = %d, want %d", ce.Usage.CacheReadTokens, exp.CacheReadTokens)
+				if exp.PromptCacheHitTokens > 0 && ce.Usage.PromptCacheHitTokens != exp.PromptCacheHitTokens {
+					t.Fatalf("Usage.PromptCacheHitTokens = %d, want %d", ce.Usage.PromptCacheHitTokens, exp.PromptCacheHitTokens)
 				}
-				if exp.CacheCreationTokens > 0 && ce.Usage.CacheCreationTokens != exp.CacheCreationTokens {
-					t.Fatalf("Usage.CacheCreationTokens = %d, want %d", ce.Usage.CacheCreationTokens, exp.CacheCreationTokens)
+				if exp.PromptCacheWriteTokens > 0 && ce.Usage.PromptCacheWriteTokens != exp.PromptCacheWriteTokens {
+					t.Fatalf("Usage.PromptCacheWriteTokens = %d, want %d", ce.Usage.PromptCacheWriteTokens, exp.PromptCacheWriteTokens)
 				}
 
 				// Verify StopReason is set
@@ -713,20 +713,20 @@ func TestE2E_Stats_Streaming(t *testing.T) {
 				// Verify usage — crucially, InputTokens must not be 0
 				// This is the core test for Bug #1 (Anthropic splits usage across events).
 				exp := expectedUsageForOutbound(out.protocol)
-				if ce.Usage.InputTokens != exp.InputTokens {
-					t.Fatalf("Usage.InputTokens = %d, want %d (streaming usage merge bug?)", ce.Usage.InputTokens, exp.InputTokens)
+				if ce.Usage.PromptTokens != exp.PromptTokens {
+					t.Fatalf("Usage.PromptTokens = %d, want %d (streaming usage merge bug?)", ce.Usage.PromptTokens, exp.PromptTokens)
 				}
-				if ce.Usage.OutputTokens != exp.OutputTokens {
-					t.Fatalf("Usage.OutputTokens = %d, want %d", ce.Usage.OutputTokens, exp.OutputTokens)
+				if ce.Usage.CompletionTokens != exp.CompletionTokens {
+					t.Fatalf("Usage.CompletionTokens = %d, want %d", ce.Usage.CompletionTokens, exp.CompletionTokens)
 				}
 				if exp.TotalTokens > 0 && ce.Usage.TotalTokens != exp.TotalTokens {
 					t.Fatalf("Usage.TotalTokens = %d, want %d", ce.Usage.TotalTokens, exp.TotalTokens)
 				}
-				if exp.CacheReadTokens > 0 && ce.Usage.CacheReadTokens != exp.CacheReadTokens {
-					t.Fatalf("Usage.CacheReadTokens = %d, want %d (cache token decode bug?)", ce.Usage.CacheReadTokens, exp.CacheReadTokens)
+				if exp.PromptCacheHitTokens > 0 && ce.Usage.PromptCacheHitTokens != exp.PromptCacheHitTokens {
+					t.Fatalf("Usage.PromptCacheHitTokens = %d, want %d (cache token decode bug?)", ce.Usage.PromptCacheHitTokens, exp.PromptCacheHitTokens)
 				}
-				if exp.CacheCreationTokens > 0 && ce.Usage.CacheCreationTokens != exp.CacheCreationTokens {
-					t.Fatalf("Usage.CacheCreationTokens = %d, want %d (cache token decode bug?)", ce.Usage.CacheCreationTokens, exp.CacheCreationTokens)
+				if exp.PromptCacheWriteTokens > 0 && ce.Usage.PromptCacheWriteTokens != exp.PromptCacheWriteTokens {
+					t.Fatalf("Usage.PromptCacheWriteTokens = %d, want %d (cache token decode bug?)", ce.Usage.PromptCacheWriteTokens, exp.PromptCacheWriteTokens)
 				}
 
 				// Verify StopReason is set
@@ -769,11 +769,11 @@ func TestE2E_Stats_Anthropic_CacheTokens_NonStreaming(t *testing.T) {
 				t.Fatalf("OnComplete called %d times, want 1", len(completes))
 			}
 			ce := completes[0]
-			if ce.Usage.CacheReadTokens != 30 {
-				t.Fatalf("CacheReadTokens = %d, want 30", ce.Usage.CacheReadTokens)
+			if ce.Usage.PromptCacheHitTokens != 30 {
+				t.Fatalf("CacheReadTokens = %d, want 30", ce.Usage.PromptCacheHitTokens)
 			}
-			if ce.Usage.CacheCreationTokens != 10 {
-				t.Fatalf("CacheCreationTokens = %d, want 10", ce.Usage.CacheCreationTokens)
+			if ce.Usage.PromptCacheWriteTokens != 10 {
+				t.Fatalf("CacheCreationTokens = %d, want 10", ce.Usage.PromptCacheWriteTokens)
 			}
 		})
 	}
@@ -804,17 +804,17 @@ func TestE2E_Stats_Anthropic_CacheTokens_Streaming(t *testing.T) {
 			// This is the critical test for Bug #1 + Bug #2:
 			// InputTokens comes from message_start, OutputTokens from message_delta.
 			// Before the fix, message_delta overwrote InputTokens to 0.
-			if ce.Usage.InputTokens != 100 {
-				t.Fatalf("InputTokens = %d, want 100 (streaming merge bug: message_delta overwrote message_start values)", ce.Usage.InputTokens)
+			if ce.Usage.PromptTokens != 140 {
+				t.Fatalf("PromptTokens = %d, want 140 (input_tokens + cache_creation + cache_read)", ce.Usage.PromptTokens)
 			}
-			if ce.Usage.OutputTokens != 25 {
-				t.Fatalf("OutputTokens = %d, want 25", ce.Usage.OutputTokens)
+			if ce.Usage.CompletionTokens != 25 {
+				t.Fatalf("OutputTokens = %d, want 25", ce.Usage.CompletionTokens)
 			}
-			if ce.Usage.CacheReadTokens != 30 {
-				t.Fatalf("CacheReadTokens = %d, want 30 (cache tokens missing from message_start decode)", ce.Usage.CacheReadTokens)
+			if ce.Usage.PromptCacheHitTokens != 30 {
+				t.Fatalf("CacheReadTokens = %d, want 30 (cache tokens missing from message_start decode)", ce.Usage.PromptCacheHitTokens)
 			}
-			if ce.Usage.CacheCreationTokens != 10 {
-				t.Fatalf("CacheCreationTokens = %d, want 10 (cache tokens missing from message_start decode)", ce.Usage.CacheCreationTokens)
+			if ce.Usage.PromptCacheWriteTokens != 10 {
+				t.Fatalf("CacheCreationTokens = %d, want 10 (cache tokens missing from message_start decode)", ce.Usage.PromptCacheWriteTokens)
 			}
 		})
 	}
@@ -884,11 +884,11 @@ func TestE2E_Stats_SDK_AnthropicStream_Usage(t *testing.T) {
 			ce := completes[0]
 			exp := expectedUsageForOutbound(out.protocol)
 
-			if ce.Usage.InputTokens != exp.InputTokens {
-				t.Errorf("StatsReporter.InputTokens = %d, want %d", ce.Usage.InputTokens, exp.InputTokens)
+			if ce.Usage.PromptTokens != exp.PromptTokens {
+				t.Errorf("StatsReporter.PromptTokens = %d, want %d", ce.Usage.PromptTokens, exp.PromptTokens)
 			}
-			if ce.Usage.OutputTokens != exp.OutputTokens {
-				t.Errorf("StatsReporter.OutputTokens = %d, want %d", ce.Usage.OutputTokens, exp.OutputTokens)
+			if ce.Usage.CompletionTokens != exp.CompletionTokens {
+				t.Errorf("StatsReporter.CompletionTokens = %d, want %d", ce.Usage.CompletionTokens, exp.CompletionTokens)
 			}
 			if ce.StopReason == "" {
 				t.Error("StatsReporter.StopReason is empty")
@@ -899,18 +899,20 @@ func TestE2E_Stats_SDK_AnthropicStream_Usage(t *testing.T) {
 
 			// Verify Anthropic SDK accumulated response usage.
 			// OutputTokens should always be correct (set via message_delta).
-			if message.Usage.OutputTokens != int64(exp.OutputTokens) {
-				t.Errorf("SDK.Usage.OutputTokens = %d, want %d", message.Usage.OutputTokens, exp.OutputTokens)
+			if message.Usage.OutputTokens != int64(exp.CompletionTokens) {
+				t.Errorf("SDK.Usage.OutputTokens = %d, want %d", message.Usage.OutputTokens, exp.CompletionTokens)
 			}
 
-			// InputTokens: The Anthropic SDK only reads input_tokens from
+			// PromptTokens: The Anthropic SDK only reads input_tokens from
 			// message_start, not from message_delta. For cross-protocol streams
 			// where usage arrives at the end, message_start has input_tokens=0.
 			// Native Anthropic outbound sends input_tokens in message_start.
 			if out.protocol == llmapimux.ProtocolAnthropic {
-				if message.Usage.InputTokens != int64(exp.InputTokens) {
-					t.Errorf("SDK.Usage.InputTokens = %d, want %d (native Anthropic should have correct InputTokens)",
-						message.Usage.InputTokens, exp.InputTokens)
+				// SDK InputTokens = Anthropic native input_tokens = PromptTokens - PromptCacheWriteTokens - PromptCacheHitTokens
+				anthropicInputTokens := exp.PromptTokens - exp.PromptCacheWriteTokens - exp.PromptCacheHitTokens
+				if message.Usage.InputTokens != int64(anthropicInputTokens) {
+					t.Errorf("SDK.Usage.InputTokens = %d, want %d (native Anthropic input_tokens = PromptTokens - PromptCacheHitTokens)",
+						message.Usage.InputTokens, anthropicInputTokens)
 				}
 			} else {
 				// Cross-protocol: input_tokens in message_start is 0 because
@@ -922,7 +924,7 @@ func TestE2E_Stats_SDK_AnthropicStream_Usage(t *testing.T) {
 						message.Usage.InputTokens)
 				}
 				t.Logf("KNOWN LIMITATION: Anthropic SDK InputTokens=%d (want %d) when outbound is %s — SDK only reads input_tokens from message_start",
-					message.Usage.InputTokens, exp.InputTokens, out.name)
+					message.Usage.InputTokens, exp.PromptTokens, out.name)
 			}
 		})
 	}
@@ -976,11 +978,11 @@ func TestE2E_Stats_SDK_OpenAIChatStream_Usage(t *testing.T) {
 			ce := completes[0]
 			exp := expectedUsageForOutbound(out.protocol)
 
-			if ce.Usage.InputTokens != exp.InputTokens {
-				t.Errorf("StatsReporter.InputTokens = %d, want %d", ce.Usage.InputTokens, exp.InputTokens)
+			if ce.Usage.PromptTokens != exp.PromptTokens {
+				t.Errorf("StatsReporter.PromptTokens = %d, want %d", ce.Usage.PromptTokens, exp.PromptTokens)
 			}
-			if ce.Usage.OutputTokens != exp.OutputTokens {
-				t.Errorf("StatsReporter.OutputTokens = %d, want %d", ce.Usage.OutputTokens, exp.OutputTokens)
+			if ce.Usage.CompletionTokens != exp.CompletionTokens {
+				t.Errorf("StatsReporter.CompletionTokens = %d, want %d", ce.Usage.CompletionTokens, exp.CompletionTokens)
 			}
 			if ce.StopReason == "" {
 				t.Error("StatsReporter.StopReason is empty")
@@ -998,7 +1000,7 @@ func TestE2E_Stats_SDK_OpenAIChatStream_Usage(t *testing.T) {
 			// the authoritative usage values.
 			cc := acc.ChatCompletion
 			t.Logf("SDK.Usage: PromptTokens=%d, CompletionTokens=%d (StatsReporter: Input=%d, Output=%d)",
-				cc.Usage.PromptTokens, cc.Usage.CompletionTokens, ce.Usage.InputTokens, ce.Usage.OutputTokens)
+				cc.Usage.PromptTokens, cc.Usage.CompletionTokens, ce.Usage.PromptTokens, ce.Usage.CompletionTokens)
 		})
 	}
 }
@@ -1055,11 +1057,11 @@ func TestE2E_Stats_SDK_GeminiStream_Usage(t *testing.T) {
 			ce := completes[0]
 			exp := expectedUsageForOutbound(out.protocol)
 
-			if ce.Usage.InputTokens != exp.InputTokens {
-				t.Errorf("StatsReporter.InputTokens = %d, want %d", ce.Usage.InputTokens, exp.InputTokens)
+			if ce.Usage.PromptTokens != exp.PromptTokens {
+				t.Errorf("StatsReporter.PromptTokens = %d, want %d", ce.Usage.PromptTokens, exp.PromptTokens)
 			}
-			if ce.Usage.OutputTokens != exp.OutputTokens {
-				t.Errorf("StatsReporter.OutputTokens = %d, want %d", ce.Usage.OutputTokens, exp.OutputTokens)
+			if ce.Usage.CompletionTokens != exp.CompletionTokens {
+				t.Errorf("StatsReporter.CompletionTokens = %d, want %d", ce.Usage.CompletionTokens, exp.CompletionTokens)
 			}
 			if ce.StopReason == "" {
 				t.Error("StatsReporter.StopReason is empty")
@@ -1081,7 +1083,7 @@ func TestE2E_Stats_SDK_GeminiStream_Usage(t *testing.T) {
 					lastUsage.PromptTokenCount, lastUsage.CandidatesTokenCount)
 			} else {
 				t.Logf("SDK: no UsageMetadata in any streaming chunk (StatsReporter has correct usage: Input=%d, Output=%d)",
-					ce.Usage.InputTokens, ce.Usage.OutputTokens)
+					ce.Usage.PromptTokens, ce.Usage.CompletionTokens)
 			}
 		})
 	}
@@ -1139,11 +1141,11 @@ func TestE2E_Stats_SDK_OpenAIResponsesStream_Usage(t *testing.T) {
 			ce := completes[0]
 			exp := expectedUsageForOutbound(out.protocol)
 
-			if ce.Usage.InputTokens != exp.InputTokens {
-				t.Errorf("StatsReporter.InputTokens = %d, want %d", ce.Usage.InputTokens, exp.InputTokens)
+			if ce.Usage.PromptTokens != exp.PromptTokens {
+				t.Errorf("StatsReporter.PromptTokens = %d, want %d", ce.Usage.PromptTokens, exp.PromptTokens)
 			}
-			if ce.Usage.OutputTokens != exp.OutputTokens {
-				t.Errorf("StatsReporter.OutputTokens = %d, want %d", ce.Usage.OutputTokens, exp.OutputTokens)
+			if ce.Usage.CompletionTokens != exp.CompletionTokens {
+				t.Errorf("StatsReporter.CompletionTokens = %d, want %d", ce.Usage.CompletionTokens, exp.CompletionTokens)
 			}
 			if ce.StopReason == "" {
 				t.Error("StatsReporter.StopReason is empty")
@@ -1158,15 +1160,15 @@ func TestE2E_Stats_SDK_OpenAIResponsesStream_Usage(t *testing.T) {
 			// different streaming event semantics that may not produce a
 			// response.completed event recognizable by the OpenAI SDK.
 			if lastResp != nil {
-				if lastResp.Usage.InputTokens != int64(exp.InputTokens) {
-					t.Errorf("SDK.Usage.InputTokens = %d, want %d", lastResp.Usage.InputTokens, exp.InputTokens)
+				if lastResp.Usage.InputTokens != int64(exp.PromptTokens) {
+					t.Errorf("SDK.Usage.InputTokens = %d, want %d", lastResp.Usage.InputTokens, exp.PromptTokens)
 				}
-				if lastResp.Usage.OutputTokens != int64(exp.OutputTokens) {
-					t.Errorf("SDK.Usage.OutputTokens = %d, want %d", lastResp.Usage.OutputTokens, exp.OutputTokens)
+				if lastResp.Usage.OutputTokens != int64(exp.CompletionTokens) {
+					t.Errorf("SDK.Usage.OutputTokens = %d, want %d", lastResp.Usage.OutputTokens, exp.CompletionTokens)
 				}
 			} else {
 				t.Logf("SDK: no response.completed event received (StatsReporter has correct usage: Input=%d, Output=%d)",
-					ce.Usage.InputTokens, ce.Usage.OutputTokens)
+					ce.Usage.PromptTokens, ce.Usage.CompletionTokens)
 			}
 		})
 	}
@@ -1229,11 +1231,11 @@ func TestE2E_Stats_GeminiStreaming_MultiChunk(t *testing.T) {
 			ce := completes[0]
 
 			// Usage should come from the final chunk
-			if ce.Usage.InputTokens != 42 {
-				t.Errorf("Usage.InputTokens = %d, want 42", ce.Usage.InputTokens)
+			if ce.Usage.PromptTokens != 42 {
+				t.Errorf("Usage.PromptTokens = %d, want 42", ce.Usage.PromptTokens)
 			}
-			if ce.Usage.OutputTokens != 8 {
-				t.Errorf("Usage.OutputTokens = %d, want 8", ce.Usage.OutputTokens)
+			if ce.Usage.CompletionTokens != 8 {
+				t.Errorf("Usage.CompletionTokens = %d, want 8", ce.Usage.CompletionTokens)
 			}
 			if ce.Usage.TotalTokens != 50 {
 				t.Errorf("Usage.TotalTokens = %d, want 50", ce.Usage.TotalTokens)
@@ -1301,11 +1303,11 @@ func TestE2E_Stats_GeminiStreaming_UsageInSeparateChunk(t *testing.T) {
 			ce := completes[0]
 
 			// Usage should be collected from the separate chunk
-			if ce.Usage.InputTokens != 50 {
-				t.Errorf("Usage.InputTokens = %d, want 50", ce.Usage.InputTokens)
+			if ce.Usage.PromptTokens != 50 {
+				t.Errorf("Usage.PromptTokens = %d, want 50", ce.Usage.PromptTokens)
 			}
-			if ce.Usage.OutputTokens != 12 {
-				t.Errorf("Usage.OutputTokens = %d, want 12", ce.Usage.OutputTokens)
+			if ce.Usage.CompletionTokens != 12 {
+				t.Errorf("Usage.CompletionTokens = %d, want 12", ce.Usage.CompletionTokens)
 			}
 			if ce.Usage.TotalTokens != 62 {
 				t.Errorf("Usage.TotalTokens = %d, want 62", ce.Usage.TotalTokens)
@@ -1367,11 +1369,11 @@ func TestE2E_Stats_SDK_AnthropicStream_InputTokens_FromGemini(t *testing.T) {
 		t.Fatalf("OnComplete called %d times, want 1", len(completes))
 	}
 	ce := completes[0]
-	if ce.Usage.InputTokens != 100 {
-		t.Fatalf("StatsReporter.InputTokens = %d, want 100", ce.Usage.InputTokens)
+	if ce.Usage.PromptTokens != 100 {
+		t.Fatalf("StatsReporter.PromptTokens = %d, want 100", ce.Usage.PromptTokens)
 	}
-	if ce.Usage.OutputTokens != 25 {
-		t.Fatalf("StatsReporter.OutputTokens = %d, want 25", ce.Usage.OutputTokens)
+	if ce.Usage.CompletionTokens != 25 {
+		t.Fatalf("StatsReporter.CompletionTokens = %d, want 25", ce.Usage.CompletionTokens)
 	}
 
 	// SDK OutputTokens should be correct
@@ -1379,10 +1381,10 @@ func TestE2E_Stats_SDK_AnthropicStream_InputTokens_FromGemini(t *testing.T) {
 		t.Fatalf("SDK.Usage.OutputTokens = %d, want 25", message.Usage.OutputTokens)
 	}
 
-	// SDK InputTokens: this is the core bug.
+	// SDK PromptTokens: this is the core bug.
 	// The Anthropic SDK only reads input_tokens from message_start (line 27 of messageutil.go:
 	// `*acc = event.Message`). It only updates OutputTokens from message_delta (line 31:
-	// `acc.Usage.OutputTokens = event.Usage.OutputTokens`).
+	// `acc.Usage.CompletionTokens = event.Usage.CompletionTokens`).
 	//
 	// When Gemini is the outbound, the message_start has input_tokens=0 because
 	// Gemini doesn't send usageMetadata until the final chunk. The message_delta
