@@ -1141,11 +1141,11 @@ func TestDecodeGeminiResponse_Basic(t *testing.T) {
 		t.Errorf("Content[0].Text = %q, want %q", resp.Content[0].Text.Text, "Hello!")
 	}
 
-	if resp.Usage.InputTokens != 10 {
-		t.Errorf("Usage.InputTokens = %d, want 10", resp.Usage.InputTokens)
+	if resp.Usage.PromptTokens != 10 {
+		t.Errorf("Usage.PromptTokens = %d, want 10", resp.Usage.PromptTokens)
 	}
-	if resp.Usage.OutputTokens != 5 {
-		t.Errorf("Usage.OutputTokens = %d, want 5", resp.Usage.OutputTokens)
+	if resp.Usage.CompletionTokens != 5 {
+		t.Errorf("Usage.CompletionTokens = %d, want 5", resp.Usage.CompletionTokens)
 	}
 	if resp.Usage.TotalTokens != 15 {
 		t.Errorf("Usage.TotalTokens = %d, want 15", resp.Usage.TotalTokens)
@@ -1241,8 +1241,8 @@ func TestEncodeGeminiResponse_Basic(t *testing.T) {
 		},
 		StopReason: StopReasonEndTurn,
 		Usage: Usage{
-			InputTokens:  10,
-			OutputTokens: 5,
+			PromptTokens:  10,
+			CompletionTokens: 5,
 			TotalTokens:  15,
 		},
 	}
@@ -1291,7 +1291,7 @@ func TestEncodeGeminiResponse_ToolUse(t *testing.T) {
 			}},
 		},
 		StopReason: StopReasonToolUse,
-		Usage:      Usage{InputTokens: 10, OutputTokens: 20, TotalTokens: 30},
+		Usage:      Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
 	}
 
 	body, err := EncodeGeminiResponse(resp)
@@ -1321,7 +1321,7 @@ func TestEncodeGeminiResponse_ToolUse(t *testing.T) {
 	}
 }
 
-func TestEncodeGeminiResponse_PauseTurnDowngradesToStop(t *testing.T) {
+func TestEncodeGeminiResponse_PauseTurnMapsToLength(t *testing.T) {
 	resp := &Response{
 		Model:      "gemini-2.5-pro",
 		StopReason: StopReasonPauseTurn,
@@ -1340,12 +1340,12 @@ func TestEncodeGeminiResponse_PauseTurnDowngradesToStop(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if raw.Candidates[0].FinishReason != "STOP" {
-		t.Fatalf("FinishReason = %q, want %q", raw.Candidates[0].FinishReason, "STOP")
+	if raw.Candidates[0].FinishReason != "MAX_TOKENS" {
+		t.Fatalf("FinishReason = %q, want %q", raw.Candidates[0].FinishReason, "MAX_TOKENS")
 	}
 }
 
-func TestEncodeGeminiStreamChunk_PauseTurnDowngradesToStop(t *testing.T) {
+func TestEncodeGeminiStreamChunk_PauseTurnMapsToLength(t *testing.T) {
 	stopReason := StopReasonPauseTurn
 	event := &StreamEvent{
 		Type:       StreamEventStop,
@@ -1362,8 +1362,8 @@ func TestEncodeGeminiStreamChunk_PauseTurnDowngradesToStop(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if raw.Candidates[0].FinishReason != "STOP" {
-		t.Fatalf("FinishReason = %q, want %q", raw.Candidates[0].FinishReason, "STOP")
+	if raw.Candidates[0].FinishReason != "MAX_TOKENS" {
+		t.Fatalf("FinishReason = %q, want %q", raw.Candidates[0].FinishReason, "MAX_TOKENS")
 	}
 }
 
@@ -1453,11 +1453,11 @@ func TestDecodeGeminiStreamChunk(t *testing.T) {
 		if event.Usage == nil {
 			t.Fatal("Usage is nil")
 		}
-		if event.Usage.InputTokens != 5 {
-			t.Errorf("Usage.InputTokens = %d, want 5", event.Usage.InputTokens)
+		if event.Usage.PromptTokens != 5 {
+			t.Errorf("Usage.PromptTokens = %d, want 5", event.Usage.PromptTokens)
 		}
-		if event.Usage.OutputTokens != 10 {
-			t.Errorf("Usage.OutputTokens = %d, want 10", event.Usage.OutputTokens)
+		if event.Usage.CompletionTokens != 10 {
+			t.Errorf("Usage.CompletionTokens = %d, want 10", event.Usage.CompletionTokens)
 		}
 	})
 
@@ -1575,8 +1575,8 @@ func TestEncodeGeminiStreamChunk(t *testing.T) {
 			Type:       StreamEventStop,
 			StopReason: &stopReason,
 			Usage: &Usage{
-				InputTokens:  10,
-				OutputTokens: 20,
+				PromptTokens:  10,
+				CompletionTokens: 20,
 				TotalTokens:  30,
 			},
 		}
@@ -1950,7 +1950,7 @@ func TestEncodeDecodeGeminiResponse_RoundTrip(t *testing.T) {
 			{Type: ContentTypeText, Text: &TextContent{Text: "Hello!"}},
 		},
 		StopReason: StopReasonEndTurn,
-		Usage:      Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		Usage:      Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 	}
 
 	body, err := EncodeGeminiResponse(original)
@@ -1975,14 +1975,14 @@ func TestEncodeDecodeGeminiResponse_RoundTrip(t *testing.T) {
 	if decoded.Content[0].Text.Text != "Hello!" {
 		t.Errorf("Content[0].Text = %q, want %q", decoded.Content[0].Text.Text, "Hello!")
 	}
-	if decoded.Usage.InputTokens != 10 {
-		t.Errorf("Usage.InputTokens = %d, want 10", decoded.Usage.InputTokens)
+	if decoded.Usage.PromptTokens != 10 {
+		t.Errorf("Usage.PromptTokens = %d, want 10", decoded.Usage.PromptTokens)
 	}
 }
 
 // TestDecodeGeminiResponse_ThoughtsTokenCount verifies that the Gemini API
 // wire key "thoughtsTokenCount" (with "s" in "thoughts") is decoded correctly
-// into Usage.ThinkingTokens. This is a regression test for the prior bug where
+// into Usage.CompletionReasoningTokens. This is a regression test for the prior bug where
 // the struct tag was "thinkingTokenCount" (missing the "s").
 func TestDecodeGeminiResponse_ThoughtsTokenCount(t *testing.T) {
 	body := []byte(`{
@@ -2003,14 +2003,14 @@ func TestDecodeGeminiResponse_ThoughtsTokenCount(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if resp.Usage.ThinkingTokens != 30 {
-		t.Errorf("Usage.ThinkingTokens = %d, want 30 (wire key is thoughtsTokenCount)", resp.Usage.ThinkingTokens)
+	if resp.Usage.CompletionReasoningTokens != 30 {
+		t.Errorf("Usage.CompletionReasoningTokens = %d, want 30 (wire key is thoughtsTokenCount)", resp.Usage.CompletionReasoningTokens)
 	}
-	if resp.Usage.InputTokens != 20 {
-		t.Errorf("Usage.InputTokens = %d, want 20", resp.Usage.InputTokens)
+	if resp.Usage.PromptTokens != 20 {
+		t.Errorf("Usage.PromptTokens = %d, want 20", resp.Usage.PromptTokens)
 	}
-	if resp.Usage.OutputTokens != 50 {
-		t.Errorf("Usage.OutputTokens = %d, want 50", resp.Usage.OutputTokens)
+	if resp.Usage.CompletionTokens != 50 {
+		t.Errorf("Usage.CompletionTokens = %d, want 50", resp.Usage.CompletionTokens)
 	}
 	if resp.Usage.TotalTokens != 70 {
 		t.Errorf("Usage.TotalTokens = %d, want 70", resp.Usage.TotalTokens)
@@ -2028,10 +2028,10 @@ func TestEncodeGeminiResponse_ThoughtsTokenCountWireKey(t *testing.T) {
 		},
 		StopReason: StopReasonEndTurn,
 		Usage: Usage{
-			InputTokens:    10,
-			OutputTokens:   20,
+			PromptTokens:    10,
+			CompletionTokens:   20,
 			TotalTokens:    30,
-			ThinkingTokens: 15,
+			CompletionReasoningTokens: 15,
 		},
 	}
 
@@ -2080,10 +2080,10 @@ func TestDecodeEncodeGeminiResponse_ThinkingTokensRoundTrip(t *testing.T) {
 		},
 		StopReason: StopReasonEndTurn,
 		Usage: Usage{
-			InputTokens:    5,
-			OutputTokens:   10,
+			PromptTokens:    5,
+			CompletionTokens:   10,
 			TotalTokens:    15,
-			ThinkingTokens: 8,
+			CompletionReasoningTokens: 8,
 		},
 	}
 
@@ -2097,14 +2097,14 @@ func TestDecodeEncodeGeminiResponse_ThinkingTokensRoundTrip(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if decoded.Usage.ThinkingTokens != original.Usage.ThinkingTokens {
-		t.Errorf("ThinkingTokens round-trip: got %d, want %d", decoded.Usage.ThinkingTokens, original.Usage.ThinkingTokens)
+	if decoded.Usage.CompletionReasoningTokens != original.Usage.CompletionReasoningTokens {
+		t.Errorf("ThinkingTokens round-trip: got %d, want %d", decoded.Usage.CompletionReasoningTokens, original.Usage.CompletionReasoningTokens)
 	}
-	if decoded.Usage.InputTokens != original.Usage.InputTokens {
-		t.Errorf("InputTokens round-trip: got %d, want %d", decoded.Usage.InputTokens, original.Usage.InputTokens)
+	if decoded.Usage.PromptTokens != original.Usage.PromptTokens {
+		t.Errorf("InputTokens round-trip: got %d, want %d", decoded.Usage.PromptTokens, original.Usage.PromptTokens)
 	}
-	if decoded.Usage.OutputTokens != original.Usage.OutputTokens {
-		t.Errorf("OutputTokens round-trip: got %d, want %d", decoded.Usage.OutputTokens, original.Usage.OutputTokens)
+	if decoded.Usage.CompletionTokens != original.Usage.CompletionTokens {
+		t.Errorf("OutputTokens round-trip: got %d, want %d", decoded.Usage.CompletionTokens, original.Usage.CompletionTokens)
 	}
 }
 

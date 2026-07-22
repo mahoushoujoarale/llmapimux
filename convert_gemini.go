@@ -171,6 +171,39 @@ func generateSyntheticID() string {
 	return fmt.Sprintf("call_%x", b)
 }
 
+// distributeCitationsToTextParts assigns candidate-level citations to the text content parts
+// they belong to, based on character offset ranges. Gemini citations are candidate-level;
+// other protocols (Anthropic, OpenAI) expect them at the part level.
+func distributeCitationsToTextParts(content []ContentPart, citations []Citation) {
+	if len(citations) == 0 {
+		return
+	}
+	offset := 0
+	for i := range content {
+		if content[i].Type != ContentTypeText || content[i].Text == nil {
+			continue
+		}
+		partLen := len(content[i].Text.Text)
+		partStart := offset
+		partEnd := offset + partLen
+
+		var partCitations []Citation
+		for _, c := range citations {
+			if c.Start != nil && c.End != nil &&
+				*c.Start >= partStart && *c.End <= partEnd {
+				adjusted := c
+				s := *c.Start - partStart
+				e := *c.End - partStart
+				adjusted.Start = &s
+				adjusted.End = &e
+				partCitations = append(partCitations, adjusted)
+			}
+		}
+		content[i].Citations = partCitations
+		offset = partEnd
+	}
+}
+
 // --- URL path parsing ---
 
 // parseGeminiModelFromURL extracts the model name from a Gemini API URL path.
@@ -887,11 +920,12 @@ func DecodeGeminiResponse(body []byte) (*Response, error) {
 	// Usage
 	if raw.UsageMetadata != nil {
 		resp.Usage = Usage{
-			InputTokens:     raw.UsageMetadata.PromptTokenCount,
-			OutputTokens:    raw.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:     raw.UsageMetadata.TotalTokenCount,
-			ThinkingTokens:  raw.UsageMetadata.ThoughtsTokenCount,
-			CacheReadTokens: raw.UsageMetadata.CachedContentTokenCount,
+			PromptTokens:             raw.UsageMetadata.PromptTokenCount,
+			PromptCacheHitTokens:     raw.UsageMetadata.CachedContentTokenCount,
+			CompletionTokens:         raw.UsageMetadata.CandidatesTokenCount,
+			CompletionReasoningTokens: raw.UsageMetadata.ThoughtsTokenCount,
+			ServerToolUseTokens:      raw.UsageMetadata.ToolUsePromptTokenCount,
+			TotalTokens:              raw.UsageMetadata.TotalTokenCount,
 		}
 	}
 
@@ -907,7 +941,8 @@ func DecodeGeminiResponse(body []byte) (*Response, error) {
 			resp.Content = parts
 		}
 
-		// Parse candidate-level citation metadata and attach to first text content part
+		// Parse candidate-level citation metadata and distribute to text content parts
+		// by character offset range.
 		if cand.CitationMetadata != nil && len(cand.CitationMetadata.CitationSources) > 0 {
 			citations := make([]Citation, 0, len(cand.CitationMetadata.CitationSources))
 			for _, cs := range cand.CitationMetadata.CitationSources {
@@ -922,13 +957,7 @@ func DecodeGeminiResponse(body []byte) (*Response, error) {
 				c.End = &end
 				citations = append(citations, c)
 			}
-			// Attach to first text content part (weak mapping: candidate-level → part-level)
-			for i := range resp.Content {
-				if resp.Content[i].Type == ContentTypeText {
-					resp.Content[i].Citations = citations
-					break
-				}
-			}
+			distributeCitationsToTextParts(resp.Content, citations)
 		}
 
 		// Check for FunctionCall parts to infer StopReasonToolUse
@@ -940,22 +969,26 @@ func DecodeGeminiResponse(body []byte) (*Response, error) {
 			}
 		}
 
-		if hasFunctionCall {
-			resp.StopReason = StopReasonToolUse
-		} else {
-			switch cand.FinishReason {
-			case "STOP":
+		// Map finishReason to StopReason. Only infer tool_use when finishReason
+		// is ambiguous (STOP or empty); explicit reasons like SAFETY take priority.
+		switch cand.FinishReason {
+		case "STOP":
+			if hasFunctionCall {
+				resp.StopReason = StopReasonToolUse
+			} else {
 				resp.StopReason = StopReasonEndTurn
-			case "MAX_TOKENS":
-				resp.StopReason = StopReasonMaxTokens
-			case "SAFETY":
-				resp.StopReason = StopReasonContentFilter
-			case "STOP_SEQUENCE":
-				resp.StopReason = StopReasonStopSequence
-			default:
-				if cand.FinishReason != "" {
-					resp.StopReason = StopReason(cand.FinishReason)
-				}
+			}
+		case "MAX_TOKENS":
+			resp.StopReason = StopReasonMaxTokens
+		case "SAFETY":
+			resp.StopReason = StopReasonContentFilter
+		case "STOP_SEQUENCE":
+			resp.StopReason = StopReasonStopSequence
+		default:
+			if cand.FinishReason != "" {
+				resp.StopReason = StopReason(cand.FinishReason)
+			} else if hasFunctionCall {
+				resp.StopReason = StopReasonToolUse
 			}
 		}
 	}
@@ -977,7 +1010,7 @@ func stopReasonToGeminiFinishReason(r StopReason) string {
 	case StopReasonToolUse:
 		return "STOP"
 	case StopReasonPauseTurn:
-		return "STOP"
+		return "MAX_TOKENS"
 	default:
 		return string(r)
 	}
@@ -1009,11 +1042,12 @@ func EncodeGeminiResponse(resp *Response) ([]byte, error) {
 
 	// Usage
 	raw.UsageMetadata = &gemini.UsageMetadata{
-		PromptTokenCount:        resp.Usage.InputTokens,
-		CandidatesTokenCount:    resp.Usage.OutputTokens,
+		PromptTokenCount:        resp.Usage.PromptTokens,
+		CandidatesTokenCount:    resp.Usage.CompletionTokens,
 		TotalTokenCount:         resp.Usage.TotalTokens,
-		ThoughtsTokenCount:      resp.Usage.ThinkingTokens,
-		CachedContentTokenCount: resp.Usage.CacheReadTokens,
+		ThoughtsTokenCount:      resp.Usage.CompletionReasoningTokens,
+		CachedContentTokenCount: resp.Usage.PromptCacheHitTokens,
+		ToolUsePromptTokenCount: resp.Usage.ServerToolUseTokens,
 	}
 
 	return json.Marshal(raw)
@@ -1087,11 +1121,12 @@ func DecodeGeminiStreamChunk(data []byte) ([]*StreamEvent, error) {
 	var usage *Usage
 	if raw.UsageMetadata != nil {
 		usage = &Usage{
-			InputTokens:     raw.UsageMetadata.PromptTokenCount,
-			OutputTokens:    raw.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:     raw.UsageMetadata.TotalTokenCount,
-			ThinkingTokens:  raw.UsageMetadata.ThoughtsTokenCount,
-			CacheReadTokens: raw.UsageMetadata.CachedContentTokenCount,
+			PromptTokens:             raw.UsageMetadata.PromptTokenCount,
+			PromptCacheHitTokens:     raw.UsageMetadata.CachedContentTokenCount,
+			CompletionTokens:         raw.UsageMetadata.CandidatesTokenCount,
+			CompletionReasoningTokens: raw.UsageMetadata.ThoughtsTokenCount,
+			ServerToolUseTokens:      raw.UsageMetadata.ToolUsePromptTokenCount,
+			TotalTokens:              raw.UsageMetadata.TotalTokenCount,
 		}
 	}
 
@@ -1199,11 +1234,12 @@ func EncodeGeminiStreamChunk(event *StreamEvent) ([]byte, error) {
 	// Usage
 	if event.Usage != nil {
 		raw.UsageMetadata = &gemini.UsageMetadata{
-			PromptTokenCount:        event.Usage.InputTokens,
-			CandidatesTokenCount:    event.Usage.OutputTokens,
+			PromptTokenCount:        event.Usage.PromptTokens,
+			CandidatesTokenCount:    event.Usage.CompletionTokens,
 			TotalTokenCount:         event.Usage.TotalTokens,
-			ThoughtsTokenCount:      event.Usage.ThinkingTokens,
-			CachedContentTokenCount: event.Usage.CacheReadTokens,
+			ThoughtsTokenCount:      event.Usage.CompletionReasoningTokens,
+			CachedContentTokenCount: event.Usage.PromptCacheHitTokens,
+			ToolUsePromptTokenCount: event.Usage.ServerToolUseTokens,
 		}
 	}
 

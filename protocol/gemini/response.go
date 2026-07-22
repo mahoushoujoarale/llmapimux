@@ -35,9 +35,10 @@ type CitationSource struct {
 
 // UsageMetadata holds token usage information.
 type UsageMetadata struct {
-	PromptTokenCount        int `json:"promptTokenCount,omitempty"`
-	CandidatesTokenCount    int `json:"candidatesTokenCount,omitempty"`
-	TotalTokenCount         int `json:"totalTokenCount,omitempty"`
-	ThoughtsTokenCount      int `json:"thoughtsTokenCount,omitempty"`
-	CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
+	PromptTokenCount           int `json:"promptTokenCount,omitempty"`
+	CandidatesTokenCount       int `json:"candidatesTokenCount,omitempty"`
+	TotalTokenCount            int `json:"totalTokenCount,omitempty"`
+	ThoughtsTokenCount         int `json:"thoughtsTokenCount,omitempty"`
+	CachedContentTokenCount    int `json:"cachedContentTokenCount,omitempty"`
+	ToolUsePromptTokenCount    int `json:"toolUsePromptTokenCount,omitempty"`
 }
