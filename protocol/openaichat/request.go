@@ -34,10 +34,11 @@ type ChatRequest struct {
 // ChatMessage represents a single message in the OpenAI Chat API.
 // Content can be a string or an array of content parts.
 type ChatMessage struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content,omitempty"`
-	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Role             string          `json:"role"`
+	Content          json.RawMessage `json:"content,omitempty"`
+	ReasoningContent *string         `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall      `json:"tool_calls,omitempty"`
+	ToolCallID       string          `json:"tool_call_id,omitempty"`
 }
 
 // ChatContentPart represents a single content part in an OpenAI Chat message.

@@ -3214,3 +3214,156 @@ func TestEncodeOpenAIResponsesRequest_ThinkingConfig_Phase2_Degradation(t *testi
 		t.Error("thinkingLevel should not appear in OpenAI Responses request (silently dropped)")
 	}
 }
+
+// --- Thinking / Reasoning content tests for Responses API ---
+
+func TestEncodeOpenAIResponsesResponse_ThinkingContent(t *testing.T) {
+	resp := &Response{
+		ID:         "resp_think",
+		Model:      "gpt-5.6",
+		StopReason: StopReasonEndTurn,
+		Content: []ContentPart{
+			{Type: ContentTypeThinking, Thinking: &ThinkingContent{Thinking: "Let me reason about this step by step."}},
+			{Type: ContentTypeText, Text: &TextContent{Text: "The answer is 42."}},
+		},
+		Usage: Usage{PromptTokens: 10, CompletionTokens: 50, TotalTokens: 60},
+	}
+
+	data, err := EncodeOpenAIResponsesResponse(resp)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	outputRaw, ok := raw["output"].([]interface{})
+	if !ok {
+		t.Fatalf("output is not an array: %T", raw["output"])
+	}
+	if len(outputRaw) < 2 {
+		t.Fatalf("output len = %d, want >= 2", len(outputRaw))
+	}
+
+	// First output item should be reasoning
+	reasoningItem := outputRaw[0].(map[string]interface{})
+	if reasoningItem["type"] != "reasoning" {
+		t.Errorf("output[0].type = %v, want reasoning", reasoningItem["type"])
+	}
+
+	// Check summary
+	summaryRaw, ok := reasoningItem["summary"].([]interface{})
+	if !ok {
+		t.Fatal("reasoning item has no summary array")
+	}
+	if len(summaryRaw) == 0 {
+		t.Fatal("reasoning summary is empty")
+	}
+	summaryItem := summaryRaw[0].(map[string]interface{})
+	if summaryItem["type"] != "summary_text" {
+		t.Errorf("summary[0].type = %v, want summary_text", summaryItem["type"])
+	}
+	if summaryItem["text"] != "Let me reason about this step by step." {
+		t.Errorf("summary[0].text = %v, want thinking text", summaryItem["text"])
+	}
+
+	// Second output item should be message
+	msgItem := outputRaw[1].(map[string]interface{})
+	if msgItem["type"] != "message" {
+		t.Errorf("output[1].type = %v, want message", msgItem["type"])
+	}
+}
+
+func TestDecodeOpenAIResponsesResponse_ReasoningItem(t *testing.T) {
+	body := []byte(`{
+		"id": "resp_123",
+		"model": "gpt-5.6",
+		"status": "completed",
+		"output": [
+			{
+				"type": "reasoning",
+				"id": "rs_abc",
+				"summary": [{"type": "summary_text", "text": "I need to analyze this carefully."}]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "output_text", "text": "Here is my answer."}]
+			}
+		],
+		"usage": {"input_tokens": 10, "output_tokens": 50, "total_tokens": 60}
+	}`)
+
+	resp, err := DecodeOpenAIResponsesResponse(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have thinking + text content parts
+	if len(resp.Content) != 2 {
+		t.Fatalf("Content len = %d, want 2", len(resp.Content))
+	}
+
+	// First part should be thinking
+	if resp.Content[0].Type != ContentTypeThinking {
+		t.Errorf("Content[0].Type = %q, want %q", resp.Content[0].Type, ContentTypeThinking)
+	}
+	if resp.Content[0].Thinking == nil {
+		t.Fatal("Content[0].Thinking is nil")
+	}
+	if resp.Content[0].Thinking.Thinking != "I need to analyze this carefully." {
+		t.Errorf("Thinking = %q, want %q", resp.Content[0].Thinking.Thinking, "I need to analyze this carefully.")
+	}
+
+	// Second part should be text
+	if resp.Content[1].Type != ContentTypeText {
+		t.Errorf("Content[1].Type = %q, want %q", resp.Content[1].Type, ContentTypeText)
+	}
+	if resp.Content[1].Text.Text != "Here is my answer." {
+		t.Errorf("Text = %q, want %q", resp.Content[1].Text.Text, "Here is my answer.")
+	}
+}
+
+func TestDecodeOpenAIResponsesResponse_EncryptedReasoning(t *testing.T) {
+	body := []byte(`{
+		"id": "resp_123",
+		"model": "gpt-5.6",
+		"status": "completed",
+		"output": [
+			{
+				"type": "reasoning",
+				"id": "rs_abc",
+				"encrypted_content": "encrypted_data_here"
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "output_text", "text": "Answer."}]
+			}
+		],
+		"usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+	}`)
+
+	resp, err := DecodeOpenAIResponsesResponse(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have redacted_thinking + text content parts
+	if len(resp.Content) != 2 {
+		t.Fatalf("Content len = %d, want 2", len(resp.Content))
+	}
+
+	// First part should be redacted thinking
+	if resp.Content[0].Type != ContentTypeRedactedThinking {
+		t.Errorf("Content[0].Type = %q, want %q", resp.Content[0].Type, ContentTypeRedactedThinking)
+	}
+	if resp.Content[0].RedactedThinking == nil {
+		t.Fatal("Content[0].RedactedThinking is nil")
+	}
+	if resp.Content[0].RedactedThinking.Data != "encrypted_data_here" {
+		t.Errorf("Data = %q, want %q", resp.Content[0].RedactedThinking.Data, "encrypted_data_here")
+	}
+}

@@ -2487,3 +2487,256 @@ func TestEncodeOpenAIChatRequest_ThinkingConfig_Phase2_Degradation(t *testing.T)
 		t.Error("thinkingLevel should not appear in OpenAI Chat request (silently dropped)")
 	}
 }
+
+// --- Thinking / Reasoning content tests ---
+
+func TestEncodeOpenAIChatResponse_ThinkingContent(t *testing.T) {
+	resp := &Response{
+		ID:         "chatcmpl-think",
+		Model:      "deepseek-v4-pro",
+		StopReason: StopReasonEndTurn,
+		Content: []ContentPart{
+			{Type: ContentTypeThinking, Thinking: &ThinkingContent{Thinking: "Let me think about this step by step."}},
+			{Type: ContentTypeText, Text: &TextContent{Text: "The answer is 42."}},
+		},
+		Usage: Usage{PromptTokens: 10, CompletionTokens: 50, TotalTokens: 60},
+	}
+
+	data, err := EncodeOpenAIChatResponse(resp)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	choices := raw["choices"].([]interface{})
+	if len(choices) != 1 {
+		t.Fatalf("choices len = %d, want 1", len(choices))
+	}
+	msg := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+
+	// Verify reasoning_content is present
+	if msg["reasoning_content"] != "Let me think about this step by step." {
+		t.Errorf("reasoning_content = %v, want 'Let me think about this step by step.'", msg["reasoning_content"])
+	}
+
+	// Verify content is still present
+	if msg["content"] != "The answer is 42." {
+		t.Errorf("content = %v, want 'The answer is 42.'", msg["content"])
+	}
+}
+
+func TestDecodeOpenAIChatResponse_ReasoningContent(t *testing.T) {
+	body := []byte(`{
+		"id": "chatcmpl-123",
+		"object": "chat.completion",
+		"model": "deepseek-v4-pro",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"reasoning_content": "I need to analyze this carefully.",
+				"content": "Here is my answer."
+			},
+			"finish_reason": "stop"
+		}],
+		"usage": {"prompt_tokens": 10, "completion_tokens": 50, "total_tokens": 60}
+	}`)
+
+	resp, err := DecodeOpenAIChatResponse(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have thinking + text content parts
+	if len(resp.Content) != 2 {
+		t.Fatalf("Content len = %d, want 2", len(resp.Content))
+	}
+
+	// First part should be thinking
+	if resp.Content[0].Type != ContentTypeThinking {
+		t.Errorf("Content[0].Type = %q, want %q", resp.Content[0].Type, ContentTypeThinking)
+	}
+	if resp.Content[0].Thinking == nil {
+		t.Fatal("Content[0].Thinking is nil")
+	}
+	if resp.Content[0].Thinking.Thinking != "I need to analyze this carefully." {
+		t.Errorf("Thinking = %q, want %q", resp.Content[0].Thinking.Thinking, "I need to analyze this carefully.")
+	}
+
+	// Second part should be text
+	if resp.Content[1].Type != ContentTypeText {
+		t.Errorf("Content[1].Type = %q, want %q", resp.Content[1].Type, ContentTypeText)
+	}
+	if resp.Content[1].Text.Text != "Here is my answer." {
+		t.Errorf("Text = %q, want %q", resp.Content[1].Text.Text, "Here is my answer.")
+	}
+}
+
+func TestOpenAIChatResponseRoundTrip_ThinkingContent(t *testing.T) {
+	original := &Response{
+		ID:         "chatcmpl-think-rt",
+		Model:      "deepseek-v4-pro",
+		StopReason: StopReasonEndTurn,
+		Content: []ContentPart{
+			{Type: ContentTypeThinking, Thinking: &ThinkingContent{Thinking: "Step 1: Analyze."}},
+			{Type: ContentTypeText, Text: &TextContent{Text: "Result."}},
+		},
+		Usage: Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+	}
+
+	// Encode
+	data, err := EncodeOpenAIChatResponse(original)
+	if err != nil {
+		t.Fatalf("encode error: %v", err)
+	}
+
+	// Decode back
+	decoded, err := DecodeOpenAIChatResponse(data)
+	if err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+
+	// Verify thinking content round-trips
+	if len(decoded.Content) != 2 {
+		t.Fatalf("Content len = %d, want 2", len(decoded.Content))
+	}
+	if decoded.Content[0].Type != ContentTypeThinking {
+		t.Errorf("Content[0].Type = %q, want %q", decoded.Content[0].Type, ContentTypeThinking)
+	}
+	if decoded.Content[0].Thinking.Thinking != "Step 1: Analyze." {
+		t.Errorf("Thinking = %q, want %q", decoded.Content[0].Thinking.Thinking, "Step 1: Analyze.")
+	}
+	if decoded.Content[1].Type != ContentTypeText {
+		t.Errorf("Content[1].Type = %q, want %q", decoded.Content[1].Type, ContentTypeText)
+	}
+	if decoded.Content[1].Text.Text != "Result." {
+		t.Errorf("Text = %q, want %q", decoded.Content[1].Text.Text, "Result.")
+	}
+}
+
+func TestDecodeOpenAIChatStreamChunk_ReasoningContent(t *testing.T) {
+	reasoning := "Let me reason about this..."
+	chunk := openaichat.ChatStreamChunk{
+		ID:     "chatcmpl-123",
+		Object: "chat.completion.chunk",
+		Model:  "deepseek-v4-pro",
+		Choices: []openaichat.ChatChoice{
+			{
+				Index: 0,
+				Delta: &openaichat.ChatChoiceMessage{
+					ReasoningContent: &reasoning,
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	event, err := DecodeOpenAIChatStreamChunk(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if event.Type != StreamEventDelta {
+		t.Errorf("Type = %q, want %q", event.Type, StreamEventDelta)
+	}
+	if event.Delta == nil {
+		t.Fatal("Delta is nil")
+	}
+	if event.Delta.Type != ContentTypeThinking {
+		t.Errorf("Delta.Type = %q, want %q", event.Delta.Type, ContentTypeThinking)
+	}
+	if event.Delta.Thinking == nil {
+		t.Fatal("Delta.Thinking is nil")
+	}
+	if event.Delta.Thinking.Thinking != "Let me reason about this..." {
+		t.Errorf("Thinking = %q, want %q", event.Delta.Thinking.Thinking, "Let me reason about this...")
+	}
+}
+
+func TestEncodeOpenAIChatStreamChunk_ThinkingContent(t *testing.T) {
+	event := &StreamEvent{
+		Type: StreamEventDelta,
+		Delta: &ContentPart{
+			Type:     ContentTypeThinking,
+			Thinking: &ThinkingContent{Thinking: "Hmm, let me think..."},
+		},
+	}
+
+	data, err := EncodeOpenAIChatStreamChunk(event)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw openaichat.ChatStreamChunk
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(raw.Choices) == 0 {
+		t.Fatal("no choices")
+	}
+	if raw.Choices[0].Delta == nil {
+		t.Fatal("delta is nil")
+	}
+	if raw.Choices[0].Delta.ReasoningContent == nil {
+		t.Fatal("delta.reasoning_content is nil")
+	}
+	if *raw.Choices[0].Delta.ReasoningContent != "Hmm, let me think..." {
+		t.Errorf("delta.reasoning_content = %q, want %q", *raw.Choices[0].Delta.ReasoningContent, "Hmm, let me think...")
+	}
+}
+
+func TestDecodeOpenAIChatRequest_AssistantReasoningContent(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Hello"},
+			{"role": "assistant", "reasoning_content": "I should greet the user.", "content": "Hi there!"}
+		]
+	}`)
+
+	req, err := DecodeOpenAIChatRequest(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find assistant message
+	var assistantMsg *Message
+	for i := range req.Messages {
+		if req.Messages[i].Role == RoleAssistant {
+			assistantMsg = &req.Messages[i]
+			break
+		}
+	}
+	if assistantMsg == nil {
+		t.Fatal("no assistant message found")
+	}
+
+	// Should have thinking + text content parts
+	if len(assistantMsg.Content) != 2 {
+		t.Fatalf("assistant message content len = %d, want 2", len(assistantMsg.Content))
+	}
+
+	// First part should be thinking
+	if assistantMsg.Content[0].Type != ContentTypeThinking {
+		t.Errorf("Content[0].Type = %q, want %q", assistantMsg.Content[0].Type, ContentTypeThinking)
+	}
+	if assistantMsg.Content[0].Thinking.Thinking != "I should greet the user." {
+		t.Errorf("Thinking = %q, want %q", assistantMsg.Content[0].Thinking.Thinking, "I should greet the user.")
+	}
+
+	// Second part should be text
+	if assistantMsg.Content[1].Type != ContentTypeText {
+		t.Errorf("Content[1].Type = %q, want %q", assistantMsg.Content[1].Type, ContentTypeText)
+	}
+	if assistantMsg.Content[1].Text.Text != "Hi there!" {
+		t.Errorf("Text = %q, want %q", assistantMsg.Content[1].Text.Text, "Hi there!")
+	}
+}

@@ -380,6 +380,14 @@ func parseDataURI(uri string) (mediaType string, data string, err error) {
 func decodeOpenAIChatAssistantMessage(m openaichat.ChatMessage) ([]ContentPart, error) {
 	var parts []ContentPart
 
+	// Reasoning/thinking content
+	if m.ReasoningContent != nil && *m.ReasoningContent != "" {
+		parts = append(parts, ContentPart{
+			Type:     ContentTypeThinking,
+			Thinking: &ThinkingContent{Thinking: *m.ReasoningContent},
+		})
+	}
+
 	// Text content — support both string shorthand and array format.
 	if len(m.Content) > 0 && string(m.Content) != "null" {
 		contentParts, err := decodeOpenAIChatMessageContent(m.Content)
@@ -611,6 +619,7 @@ func encodeOpenAIChatAssistantMessage(m Message) (openaichat.ChatMessage, error)
 	}
 
 	var textParts []string
+	var reasoningParts []string
 	var toolCalls []openaichat.ToolCall
 
 	for _, p := range m.Content {
@@ -618,6 +627,10 @@ func encodeOpenAIChatAssistantMessage(m Message) (openaichat.ChatMessage, error)
 		case ContentTypeText:
 			if p.Text != nil {
 				textParts = append(textParts, p.Text.Text)
+			}
+		case ContentTypeThinking:
+			if p.Thinking != nil {
+				reasoningParts = append(reasoningParts, p.Thinking.Thinking)
 			}
 		case ContentTypeRefusal:
 			// Refusal in request message history — degrade to text
@@ -645,6 +658,11 @@ func encodeOpenAIChatAssistantMessage(m Message) (openaichat.ChatMessage, error)
 			return openaichat.ChatMessage{}, fmt.Errorf("marshal assistant content: %w", err)
 		}
 		msg.Content = contentJSON
+	}
+
+	if len(reasoningParts) > 0 {
+		reasoning := strings.Join(reasoningParts, "")
+		msg.ReasoningContent = &reasoning
 	}
 
 	if len(toolCalls) > 0 {
@@ -768,6 +786,14 @@ func DecodeOpenAIChatResponse(body []byte) (*Response, error) {
 				}
 			}
 
+			// Reasoning/thinking content (emitted first, matching natural order)
+			if choice.Message.ReasoningContent != nil && *choice.Message.ReasoningContent != "" {
+				resp.Content = append(resp.Content, ContentPart{
+					Type:     ContentTypeThinking,
+					Thinking: &ThinkingContent{Thinking: *choice.Message.ReasoningContent},
+				})
+			}
+
 			// Text content
 			if choice.Message.Content != nil && *choice.Message.Content != "" {
 				textPart := ContentPart{
@@ -830,6 +856,7 @@ func EncodeOpenAIChatResponse(resp *Response) ([]byte, error) {
 	}
 
 	var textParts []string
+	var reasoningParts []string
 	var refusalParts []string
 	var toolCalls []openaichat.ToolCall
 	var allCitations []Citation
@@ -842,6 +869,10 @@ func EncodeOpenAIChatResponse(resp *Response) ([]byte, error) {
 			}
 			if len(p.Citations) > 0 {
 				allCitations = append(allCitations, p.Citations...)
+			}
+		case ContentTypeThinking:
+			if p.Thinking != nil {
+				reasoningParts = append(reasoningParts, p.Thinking.Thinking)
 			}
 		case ContentTypeRefusal:
 			if p.Refusal != nil {
@@ -864,6 +895,10 @@ func EncodeOpenAIChatResponse(resp *Response) ([]byte, error) {
 	if len(textParts) > 0 {
 		text := strings.Join(textParts, "")
 		msg.Content = &text
+	}
+	if len(reasoningParts) > 0 {
+		reasoning := strings.Join(reasoningParts, "")
+		msg.ReasoningContent = &reasoning
 	}
 	if len(refusalParts) > 0 {
 		refusal := strings.Join(refusalParts, "")
@@ -940,7 +975,7 @@ func DecodeOpenAIChatStreamChunk(data []byte) (*StreamEvent, error) {
 	}
 
 	// First chunk with role
-	if delta != nil && delta.Role != "" && delta.Content == nil && delta.Refusal == nil && len(delta.ToolCalls) == 0 {
+	if delta != nil && delta.Role != "" && delta.Content == nil && delta.ReasoningContent == nil && delta.Refusal == nil && len(delta.ToolCalls) == 0 {
 		return &StreamEvent{
 			Type: StreamEventStart,
 			Response: &Response{
@@ -958,6 +993,17 @@ func DecodeOpenAIChatStreamChunk(data []byte) (*StreamEvent, error) {
 				Type:      ContentTypeRefusal,
 				Refusal:   &RefusalContent{Refusal: *delta.Refusal},
 				SourceType: ContentTypeRefusal,
+			},
+		}, nil
+	}
+
+	// Reasoning/thinking content delta
+	if delta != nil && delta.ReasoningContent != nil {
+		return &StreamEvent{
+			Type: StreamEventDelta,
+			Delta: &ContentPart{
+				Type:     ContentTypeThinking,
+				Thinking: &ThinkingContent{Thinking: *delta.ReasoningContent},
 			},
 		}, nil
 	}
@@ -1037,6 +1083,20 @@ func EncodeOpenAIChatStreamChunk(event *StreamEvent) ([]byte, error) {
 						Index: event.Index,
 						Delta: &openaichat.ChatChoiceMessage{
 							Content: &text,
+						},
+						FinishReason: nil,
+					},
+				}
+			case ContentTypeThinking:
+				var reasoning string
+				if event.Delta.Thinking != nil {
+					reasoning = event.Delta.Thinking.Thinking
+				}
+				raw.Choices = []openaichat.ChatChoice{
+					{
+						Index: event.Index,
+						Delta: &openaichat.ChatChoiceMessage{
+							ReasoningContent: &reasoning,
 						},
 						FinishReason: nil,
 					},

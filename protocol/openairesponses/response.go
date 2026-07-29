@@ -15,15 +15,23 @@ type Response struct {
 
 // OutputItem represents an item in the response output array.
 type OutputItem struct {
-	Type      string          `json:"type"`
-	ID        string          `json:"id,omitempty"`
-	Role      string          `json:"role,omitempty"`
-	Content   []OutputContent `json:"content,omitempty"`
-	CallID    string          `json:"call_id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Arguments string          `json:"arguments,omitempty"`
-	Status    string          `json:"status,omitempty"`
-	Action    json.RawMessage `json:"action,omitempty"`
+	Type             string          `json:"type"`
+	ID               string          `json:"id,omitempty"`
+	Role             string          `json:"role,omitempty"`
+	Content          []OutputContent `json:"content,omitempty"`
+	Summary          []ReasoningSummary `json:"summary,omitempty"`
+	EncryptedContent string          `json:"encrypted_content,omitempty"`
+	CallID           string          `json:"call_id,omitempty"`
+	Name             string          `json:"name,omitempty"`
+	Arguments        string          `json:"arguments,omitempty"`
+	Status           string          `json:"status,omitempty"`
+	Action           json.RawMessage `json:"action,omitempty"`
+}
+
+// ReasoningSummary represents a summary entry in a reasoning output item.
+type ReasoningSummary struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
 }
 
 // OutputContent represents a content part in a response output message.

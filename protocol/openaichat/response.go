@@ -24,11 +24,12 @@ type ChatChoice struct {
 
 // ChatChoiceMessage represents the message or delta within a choice.
 type ChatChoiceMessage struct {
-	Role        string            `json:"role,omitempty"`
-	Content     *string           `json:"content,omitempty"`
-	Refusal     *string           `json:"refusal,omitempty"`
-	ToolCalls   []ToolCall        `json:"tool_calls,omitempty"`
-	Annotations []json.RawMessage `json:"annotations,omitempty"`
+	Role             string            `json:"role,omitempty"`
+	Content          *string           `json:"content,omitempty"`
+	ReasoningContent *string          `json:"reasoning_content,omitempty"`
+	Refusal          *string           `json:"refusal,omitempty"`
+	ToolCalls        []ToolCall        `json:"tool_calls,omitempty"`
+	Annotations      []json.RawMessage `json:"annotations,omitempty"`
 }
 
 // ChatUsage represents the usage information.

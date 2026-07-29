@@ -971,6 +971,26 @@ func DecodeOpenAIResponsesResponse(body []byte) (*Response, error) {
 	hasFunctionCall := false
 	for _, item := range raw.Output {
 		switch item.Type {
+		case "reasoning":
+			// Extract thinking text from summary entries
+			var thinkingParts []string
+			for _, s := range item.Summary {
+				if s.Text != "" {
+					thinkingParts = append(thinkingParts, s.Text)
+				}
+			}
+			if len(thinkingParts) > 0 {
+				resp.Content = append(resp.Content, ContentPart{
+					Type:     ContentTypeThinking,
+					Thinking: &ThinkingContent{Thinking: strings.Join(thinkingParts, "\n")},
+				})
+			} else if item.EncryptedContent != "" {
+				// Encrypted reasoning without summary text → redacted thinking
+				resp.Content = append(resp.Content, ContentPart{
+					Type:            ContentTypeRedactedThinking,
+					RedactedThinking: &RedactedThinkingContent{Data: item.EncryptedContent},
+				})
+			}
 		case "message":
 			for _, c := range item.Content {
 				switch c.Type {
@@ -1044,12 +1064,32 @@ func EncodeOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 	}
 
 	// Build output items
+	var reasoningItems []openairesponses.OutputItem
 	var msgContent []openairesponses.OutputContent
 	var funcCalls []openairesponses.OutputItem
 	hasFunctionCall := false
 
 	for _, p := range resp.Content {
 		switch p.Type {
+		case ContentTypeThinking:
+			if p.Thinking != nil {
+				summaryText := p.Thinking.Thinking
+				if summaryText != "" {
+					reasoningItems = append(reasoningItems, openairesponses.OutputItem{
+						Type: "reasoning",
+						Summary: []openairesponses.ReasoningSummary{
+							{Type: "summary_text", Text: summaryText},
+						},
+					})
+				}
+			}
+		case ContentTypeRedactedThinking:
+			if p.RedactedThinking != nil {
+				reasoningItems = append(reasoningItems, openairesponses.OutputItem{
+					Type:             "reasoning",
+					EncryptedContent: p.RedactedThinking.Data,
+				})
+			}
 		case ContentTypeText:
 			if p.Text != nil {
 				oc := openairesponses.OutputContent{
@@ -1081,6 +1121,8 @@ func EncodeOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 		}
 	}
 
+	// Emit reasoning items before message, matching OpenAI's output order
+	raw.Output = append(raw.Output, reasoningItems...)
 	if len(msgContent) > 0 {
 		raw.Output = append(raw.Output, openairesponses.OutputItem{
 			Type:    "message",
@@ -1378,6 +1420,16 @@ func EncodeOpenAIResponsesStreamEvent(event *StreamEvent) (string, []byte, error
 		}
 		if event.Delta != nil {
 			switch event.Delta.Type {
+			case ContentTypeThinking:
+				raw.Type = "response.output_item.added"
+				raw.Item = &openairesponses.OutputItem{
+					Type: "reasoning",
+				}
+				data, err := json.Marshal(raw)
+				if err != nil {
+					return "", nil, fmt.Errorf("encode openai responses stream reasoning output_item.added: %w", err)
+				}
+				return "response.output_item.added", data, nil
 			case ContentTypeText:
 				raw.Type = "response.output_item.added"
 				raw.Item = &openairesponses.OutputItem{
@@ -1411,6 +1463,28 @@ func EncodeOpenAIResponsesStreamEvent(event *StreamEvent) (string, []byte, error
 	case StreamEventDelta:
 		if event.Delta != nil {
 			switch event.Delta.Type {
+			case ContentTypeThinking:
+				var reasoningText string
+				if event.Delta.Thinking != nil {
+					reasoningText = event.Delta.Thinking.Thinking
+				}
+				// OpenAI Responses API doesn't have a native reasoning text delta event,
+				// but we can emit it as a custom reasoning summary delta for compatibility.
+				// Skip empty deltas.
+				if reasoningText == "" {
+					return "", nil, nil
+				}
+				raw := openairesponses.StreamEvent{
+					Type:        "response.reasoning_summary_text.delta",
+					OutputIndex: intPtr(event.Index),
+					Delta:       reasoningText,
+				}
+				data, err := json.Marshal(raw)
+				if err != nil {
+					return "", nil, fmt.Errorf("encode openai responses stream reasoning_summary_text.delta: %w", err)
+				}
+				return "response.reasoning_summary_text.delta", data, nil
+
 			case ContentTypeText:
 				var text string
 				if event.Delta.Text != nil {
