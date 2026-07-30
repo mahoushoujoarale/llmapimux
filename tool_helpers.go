@@ -155,8 +155,7 @@ func selectToolsByName(tools []Tool, names []string) []Tool {
 }
 
 // sanitizeToolChoiceForEncode adapts an IR ToolChoice against the tool set
-// that survived encoding. It only intervenes when the choice is a hard
-// reference to a specific tool:
+// that survived encoding:
 //
 //   - tc.Type == "tool" with ToolName not present in encodedToolNames →
 //     degrade to "auto" so the outbound JSON does not reach the provider as
@@ -164,14 +163,25 @@ func selectToolsByName(tools []Tool, names []string) []Tool {
 //     reproduces the original "Tool choice 'function' not found in 'tools'"
 //     error class.
 //
-// Abstract choices (auto, none, required) and AllowedToolNames pass through
-// unchanged — AllowedToolNames is a soft hint in Gemini and providers that
-// strict-validate individual names generally tolerate a permissive list, so
+//   - The request declared tools but none survived encoding (irToolCount > 0 &&
+//     encodedToolCount == 0) → drop the choice entirely. This happens when every
+//     tool was a server-side tool with no representation in the target protocol.
+//     Leaving a dangling tool_choice behind is a gateway-introduced inconsistency
+//     that providers reject; a request that never had tools in the first place is
+//     passed through untouched so the provider's own validation still applies.
+//
+// Otherwise abstract choices (auto, none, required) and AllowedToolNames pass
+// through unchanged — AllowedToolNames is a soft hint in Gemini and providers
+// that strict-validate individual names generally tolerate a permissive list, so
 // we defer to provider-side validation instead of over-sanitizing here.
 // Returns nil when only AllowParallelCalls was set (empty Type, no
 // AllowedToolNames), so callers skip emitting an empty tool_choice object.
-func sanitizeToolChoiceForEncode(tc *ToolChoice, encodedToolNames map[string]bool, encodedToolCount int) *ToolChoice {
+func sanitizeToolChoiceForEncode(tc *ToolChoice, encodedToolNames map[string]bool, encodedToolCount int, irToolCount int) *ToolChoice {
 	if tc == nil {
+		return nil
+	}
+	// Every declared tool was dropped during encoding — nothing left to select.
+	if irToolCount > 0 && encodedToolCount == 0 {
 		return nil
 	}
 	clone := *tc

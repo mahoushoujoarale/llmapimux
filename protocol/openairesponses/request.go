@@ -41,6 +41,7 @@ type TextFormat struct {
 	Type   string          `json:"type"`
 	Name   string          `json:"name,omitempty"`
 	Schema json.RawMessage `json:"schema,omitempty"`
+	Strict bool            `json:"strict,omitempty"`
 }
 
 // Tool represents a tool in the Responses API.
@@ -150,6 +151,12 @@ type InputItem struct {
 	Name      string          `json:"name,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
 	Output    string          `json:"output,omitempty"`
+	// Reasoning item fields. EncryptedContent carries opaque reasoning payloads
+	// (used to round-trip Anthropic redacted_thinking); Signature carries the
+	// Anthropic thinking signature, which must be replayed verbatim.
+	Summary          []ReasoningSummary `json:"summary,omitempty"`
+	EncryptedContent string             `json:"encrypted_content,omitempty"`
+	Signature        string             `json:"signature,omitempty"`
 }
 
 // ContentPart represents a content part in an input message.
@@ -157,6 +164,7 @@ type ContentPart struct {
 	Type     string `json:"type"`
 	Text     string `json:"text,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
+	Detail   string `json:"detail,omitempty"`
 	FileID   string `json:"file_id,omitempty"`
 	FileData string `json:"file_data,omitempty"`
 	FileURL  string `json:"file_url,omitempty"`

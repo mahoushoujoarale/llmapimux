@@ -55,6 +55,9 @@ type StreamMessageDelta struct {
 }
 
 // StreamMessageDeltaInner is the inner delta in a message_delta event.
+// StopSequence uses *string so that a null is emitted when no stop sequence
+// matched, matching the Anthropic wire format.
 type StreamMessageDeltaInner struct {
-	StopReason string `json:"stop_reason"`
+	StopReason   string  `json:"stop_reason"`
+	StopSequence *string `json:"stop_sequence,omitempty"`
 }

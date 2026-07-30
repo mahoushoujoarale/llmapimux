@@ -3,7 +3,6 @@ package llmapimux
 import (
 	"encoding/json"
 	"net/http"
-	"sort"
 )
 
 // anthropicCodec implements inboundCodec for the Anthropic Messages protocol.
@@ -37,158 +36,252 @@ func (c *anthropicCodec) EncodeResponse(resp *Response) ([]byte, error) {
 }
 
 func (c *anthropicCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan StreamResult) {
-	// Track open content blocks: Anthropic index → content type.
-	// This normalises IR streams from protocols that don't produce content_block_start /
-	// content_block_stop lifecycle events (e.g. OpenAI Chat, Gemini) so the Anthropic SSE
-	// output is always well-formed for SDK accumulators.
+	// Normalise arbitrary IR streams into a well-formed Anthropic SSE stream.
 	//
-	// Gemini sends all deltas on IR index 0 regardless of content type (thinking, text,
-	// tool_use). The Anthropic protocol requires each content block to have a unique index
-	// and consistent type. We remap IR indices to sequential Anthropic indices and detect
-	// content-type changes to close/reopen blocks automatically.
-	openBlockType := map[int]ContentType{} // Anthropic index → content type
-	nextIndex := 0                         // next Anthropic block index to assign
+	// The Anthropic protocol requires content blocks to be strictly sequential:
+	// block N must be closed with content_block_stop before block N+1 is opened,
+	// and every block needs a unique index and a stable type. IR streams coming
+	// from other protocols do not honour that:
+	//   - OpenAI Chat / Gemini emit no content_block_start / content_block_stop
+	//     lifecycle events at all.
+	//   - Gemini puts every delta on IR index 0 regardless of content type.
+	//   - OpenAI Chat may interleave a text delta and several tool_call deltas on
+	//     different IR indices without ever closing the previous one.
+	//
+	// We therefore keep exactly one Anthropic block open at a time: opening a new
+	// block implicitly closes the current one.
+	type openBlock struct {
+		index       int
+		contentType ContentType
+	}
+	var current *openBlock // the single currently open Anthropic block, if any
+	nextIndex := 0         // next Anthropic block index to assign
 	messageStartSent := false
-
-	// sourceIndexMap tracks the current Anthropic index assigned to each IR source index.
-	// When the content type changes on a source index, the old Anthropic block is closed
-	// and a new one is opened with the next available index.
-	sourceIndexMap := map[int]int{} // IR source index → current Anthropic index
+	// accumulatedUsage collects usage arriving on events that have no Anthropic
+	// representation (e.g. OpenAI Chat usage-only deltas) so it can be folded into
+	// the terminating message_delta instead of being lost.
+	var accumulatedUsage Usage
+	var lastStopReason StopReason
+	var lastStopSequence string
+	// messageDeltaSent guards against emitting a second message_delta on
+	// StreamEventStop when the upstream already sent one (native Anthropic sends
+	// message_delta then message_stop).
+	messageDeltaSent := false
+	// sourceIndexMap remembers which Anthropic index an IR source index currently
+	// maps to, so repeated deltas on the same source index reuse the same block.
+	sourceIndexMap := map[int]int{}
 
 	writeSSE := func(event *StreamEvent) bool {
 		eventType, data, err := EncodeAnthropicStreamEvent(event)
 		if err != nil {
 			return false
 		}
+		if data == nil {
+			// Event has no Anthropic representation (e.g. a usage-only delta);
+			// skip it without tearing down the stream.
+			return true
+		}
 		return sseWriter.WriteEvent(eventType, data) == nil
 	}
 
-	injectBlockStart := func(index int, deltaType ContentType, delta *ContentPart) bool {
-		blockPart := ContentPart{Type: deltaType}
-		if deltaType == ContentTypeText {
-			blockPart.Text = &TextContent{}
-		} else if deltaType == ContentTypeToolUse && delta != nil && delta.ToolUse != nil {
-			blockPart.ToolUse = &ToolUseContent{
-				ID:   delta.ToolUse.ID,
-				Name: delta.ToolUse.Name,
-			}
-		} else if deltaType == ContentTypeServerToolUse && delta != nil && delta.ServerToolUse != nil {
-			blockPart.ServerToolUse = &ServerToolUseContent{
-				ID:   delta.ServerToolUse.ID,
-				Name: delta.ServerToolUse.Name,
-			}
-		} else if deltaType == ContentTypeThinking {
-			blockPart.Thinking = &ThinkingContent{}
+	// closeCurrent emits content_block_stop for the open block, if any.
+	closeCurrent := func() bool {
+		if current == nil {
+			return true
 		}
-		synthetic := &StreamEvent{
-			Type:  StreamEventContentBlockStart,
-			Index: index,
-			Delta: &blockPart,
-		}
-		return writeSSE(synthetic)
+		idx := current.index
+		current = nil
+		return writeSSE(&StreamEvent{Type: StreamEventContentBlockStop, Index: idx})
 	}
 
-loop:
+	// blockStartPart builds the content_block payload for a synthetic
+	// content_block_start. Anthropic requires the block skeleton (empty text,
+	// tool id/name) to be present up front.
+	blockStartPart := func(deltaType ContentType, delta *ContentPart) ContentPart {
+		part := ContentPart{Type: deltaType}
+		switch deltaType {
+		case ContentTypeText, ContentTypeRefusal:
+			// Refusal has no Anthropic block type and degrades to text.
+			part.Type = ContentTypeText
+			part.Text = &TextContent{}
+		case ContentTypeThinking:
+			part.Thinking = &ThinkingContent{}
+		case ContentTypeToolUse:
+			if delta != nil && delta.ToolUse != nil {
+				part.ToolUse = &ToolUseContent{ID: delta.ToolUse.ID, Name: delta.ToolUse.Name}
+			} else {
+				part.ToolUse = &ToolUseContent{}
+			}
+		case ContentTypeServerToolUse:
+			if delta != nil && delta.ServerToolUse != nil {
+				part.ServerToolUse = &ServerToolUseContent{ID: delta.ServerToolUse.ID, Name: delta.ServerToolUse.Name}
+			} else {
+				part.ServerToolUse = &ServerToolUseContent{}
+			}
+		}
+		return part
+	}
+
+	// openBlockAt closes any open block and opens a new one at the next index.
+	openBlockAt := func(deltaType ContentType, delta *ContentPart) (int, bool) {
+		if !closeCurrent() {
+			return 0, false
+		}
+		idx := nextIndex
+		nextIndex++
+		part := blockStartPart(deltaType, delta)
+		if !writeSSE(&StreamEvent{Type: StreamEventContentBlockStart, Index: idx, Delta: &part}) {
+			return 0, false
+		}
+		current = &openBlock{index: idx, contentType: deltaType}
+		return idx, true
+	}
+
+	// isBlockDelta reports whether a delta type maps onto an Anthropic content block.
+	isBlockDelta := func(t ContentType) bool {
+		switch t {
+		case ContentTypeText, ContentTypeToolUse, ContentTypeServerToolUse,
+			ContentTypeThinking, ContentTypeRefusal:
+			return true
+		}
+		return false
+	}
+
 	for result := range ch {
 		if result.Err != nil {
-			// Cannot change status code at this point — just stop.
-			break
+			// Status code is already committed — surface the failure as an SSE
+			// error event so the client can distinguish it from a clean end of
+			// stream, then stop.
+			writeSSE(&StreamEvent{
+				Type:  StreamEventError,
+				Error: &StreamError{Type: "api_error", Message: result.Err.Error()},
+			})
+			return
 		}
 
 		event := result.Event
+		if event == nil {
+			continue
+		}
 
-		// Inject message_start if the upstream skipped it (e.g. Gemini starts with delta).
+		// Collect usage and stop metadata from every event so nothing is dropped
+		// when an event itself has no Anthropic representation.
+		if event.Usage != nil {
+			mergeStreamUsage(&accumulatedUsage, event.Usage)
+		}
+		if event.Response != nil {
+			mergeStreamUsage(&accumulatedUsage, &event.Response.Usage)
+		}
+		if event.StopReason != nil {
+			lastStopReason = *event.StopReason
+		}
+		if event.StopSequence != "" {
+			lastStopSequence = event.StopSequence
+		}
+
+		// Inject message_start if the upstream skipped it (e.g. Gemini starts with a delta).
 		if !messageStartSent {
 			messageStartSent = true
 			if event.Type != StreamEventStart {
-				synthetic := &StreamEvent{
-					Type:     StreamEventStart,
-					Response: &Response{},
-				}
-				if !writeSSE(synthetic) {
-					break
+				if !writeSSE(&StreamEvent{Type: StreamEventStart, Response: &Response{}}) {
+					return
 				}
 			}
 		}
 
-		// Track upstream-provided content_block_start to prevent double-injection on subsequent deltas.
-		if event.Type == StreamEventContentBlockStart {
-			openBlockType[event.Index] = event.Delta.Type
-			sourceIndexMap[event.Index] = event.Index
-		}
-		// Remove from tracking when upstream provides a real content_block_stop,
-		// so StreamEventStop doesn't emit a duplicate synthetic stop for the same index.
-		if event.Type == StreamEventContentBlockStop {
-			delete(openBlockType, event.Index)
-		}
+		switch event.Type {
+		case StreamEventContentBlockStart:
+			// Upstream provided a real block start. Close whatever is open and
+			// re-index onto our own sequential numbering so upstream indices that
+			// are sparse or reused cannot collide.
+			deltaType := ContentTypeText
+			if event.Delta != nil {
+				deltaType = event.Delta.Type
+			}
+			// A nil Delta is legitimate: DecodeOpenAIResponsesStreamEvent produces
+			// one for output_item.added carrying an item type we do not map. Treat
+			// it as an empty text block rather than dereferencing nil.
+			idx, ok := openBlockAt(deltaType, event.Delta)
+			if !ok {
+				return
+			}
+			sourceIndexMap[event.Index] = idx
+			continue
 
-		// For deltas: detect content-type changes and remap IR index → Anthropic index.
-		if event.Type == StreamEventDelta && event.Delta != nil &&
-			(event.Delta.Type == ContentTypeText || event.Delta.Type == ContentTypeToolUse || event.Delta.Type == ContentTypeServerToolUse || event.Delta.Type == ContentTypeThinking || event.Delta.Type == ContentTypeRefusal) {
-
-			srcIdx := event.Index
-			anthIdx, mapped := sourceIndexMap[srcIdx]
-
-			if mapped {
-				if openBlockType[anthIdx] != event.Delta.Type {
-					// Content type changed on same source index — close old block.
-					if !writeSSE(&StreamEvent{Type: StreamEventContentBlockStop, Index: anthIdx}) {
-						break
+		case StreamEventContentBlockStop:
+			// Only honour a stop for the block we currently have open; stops for
+			// already-closed or unknown indices are redundant.
+			if current != nil {
+				if mapped, ok := sourceIndexMap[event.Index]; !ok || mapped == current.index {
+					if !closeCurrent() {
+						return
 					}
-					delete(openBlockType, anthIdx)
-					mapped = false
 				}
+			}
+			delete(sourceIndexMap, event.Index)
+			continue
+
+		case StreamEventDelta:
+			// A delta carrying a stop reason and no content is a native Anthropic
+			// message_delta passing through; record that so StreamEventStop does
+			// not synthesise a duplicate.
+			if event.Delta == nil && event.StopReason != nil {
+				messageDeltaSent = true
+			}
+			if event.Delta != nil && isBlockDelta(event.Delta.Type) {
+				srcIdx := event.Index
+				anthIdx, mapped := sourceIndexMap[srcIdx]
+				// Reopen when this source index has no block, when its block was
+				// superseded by another source index, or when the content type
+				// changed (Gemini switches type on the same index).
+				needNew := !mapped || current == nil || current.index != anthIdx ||
+					current.contentType != event.Delta.Type
+				if needNew {
+					newIdx, ok := openBlockAt(event.Delta.Type, event.Delta)
+					if !ok {
+						return
+					}
+					sourceIndexMap[srcIdx] = newIdx
+					anthIdx = newIdx
+				}
+				event.Index = anthIdx
 			}
 
-			if !mapped {
-				// Assign new Anthropic index and inject content_block_start.
-				anthIdx = nextIndex
-				nextIndex++
-				sourceIndexMap[srcIdx] = anthIdx
-				openBlockType[anthIdx] = event.Delta.Type
-				if !injectBlockStart(anthIdx, event.Delta.Type, event.Delta) {
-					break
-				}
+		case StreamEventStop:
+			// Close the open block before finishing: the Anthropic SDK accumulator
+			// only refreshes AsAny() on content_block_stop, so omitting it leaves
+			// the block's raw JSON stale.
+			if !closeCurrent() {
+				return
 			}
-
-			event.Index = anthIdx
-		}
-
-		// When a StreamEventStop arrives, close any open content blocks first.
-		// Anthropic SDK accumulator updates AsAny() only on ContentBlockStopEvent,
-		// so omitting it leaves the block's JSON.raw stale (empty text).
-		// Also, if the upstream encoded stop_reason directly in StreamEventStop
-		// (e.g. OpenAI Chat finish_reason), emit a separate message_delta first.
-		if event.Type == StreamEventStop {
-			indices := make([]int, 0, len(openBlockType))
-			for idx := range openBlockType {
-				indices = append(indices, idx)
-			}
-			sort.Ints(indices)
-			for _, idx := range indices {
-				stopBlock := &StreamEvent{
-					Type:  StreamEventContentBlockStop,
-					Index: idx,
-				}
-				if !writeSSE(stopBlock) {
-					break loop
-				}
-			}
+			// Anthropic carries stop_reason and final usage in message_delta, which
+			// must precede message_stop. Emit it whenever we have either — the
+			// reason may have arrived on an earlier delta (native Anthropic) or be
+			// folded into the stop event (OpenAI Chat finish_reason).
+			stopReason := lastStopReason
 			if event.StopReason != nil {
-				stopReason := *event.StopReason
-				messageDelta := &StreamEvent{
-					Type:       StreamEventDelta,
-					StopReason: &stopReason,
-					Usage:      event.Usage,
+				stopReason = *event.StopReason
+			}
+			if !messageDeltaSent && (stopReason != "" || accumulatedUsage != (Usage{})) {
+				if stopReason == "" {
+					stopReason = StopReasonEndTurn
 				}
-				if !writeSSE(messageDelta) {
-					break
+				usage := accumulatedUsage
+				md := &StreamEvent{
+					Type:         StreamEventDelta,
+					StopReason:   &stopReason,
+					StopSequence: lastStopSequence,
+					Usage:        &usage,
 				}
+				if !writeSSE(md) {
+					return
+				}
+				messageDeltaSent = true
 			}
 		}
 
 		if !writeSSE(event) {
-			break
+			return
 		}
 	}
 }

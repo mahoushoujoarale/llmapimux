@@ -39,7 +39,12 @@ func (c *openaiChatCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan
 
 	for result := range ch {
 		if result.Err != nil {
-			break
+			// The status code is already committed, so the failure has to be
+			// reported in-band. Emit an OpenAI-shaped error chunk followed by
+			// [DONE] so the client can tell a mid-stream failure from a clean
+			// end of stream instead of just seeing the connection close.
+			writeOpenAIChatStreamError(sseWriter, result.Err)
+			return
 		}
 
 		// Accumulate usage from early events (e.g. Anthropic message_start
@@ -79,6 +84,26 @@ func (c *openaiChatCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan
 			}
 		}
 
+		// An in-band IR error event (e.g. an Anthropic "error" SSE event) has no
+		// native Chat Completions chunk shape. Surface it as an error payload plus
+		// dropping it silently.
+		if result.Event != nil && result.Event.Type == StreamEventError {
+			msg := "upstream stream error"
+			if result.Event.Error != nil && result.Event.Error.Message != "" {
+				msg = result.Event.Error.Message
+			}
+			errType := "api_error"
+			code := ""
+			if result.Event.Error != nil {
+				if result.Event.Error.Type != "" {
+					errType = result.Event.Error.Type
+				}
+				code = result.Event.Error.Code
+			}
+			writeOpenAIChatStreamErrorPayload(sseWriter, errType, code, msg)
+			return
+		}
+
 		data, err := EncodeOpenAIChatStreamChunk(result.Event)
 		if err != nil {
 			break
@@ -98,6 +123,34 @@ func (c *openaiChatCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan
 		// Write the sentinel only after a complete upstream stop event.
 		sseWriter.WriteDone() //nolint:errcheck
 	}
+}
+
+// writeOpenAIChatStreamError emits a transport-level failure as an in-band SSE
+// error chunk followed by [DONE].
+func writeOpenAIChatStreamError(sseWriter *SSEWriter, err error) {
+	writeOpenAIChatStreamErrorPayload(sseWriter, "api_error", "", err.Error())
+}
+
+// writeOpenAIChatStreamErrorPayload emits an OpenAI-shaped error object on the
+// SSE stream, then the [DONE] sentinel so clients terminate cleanly.
+func writeOpenAIChatStreamErrorPayload(sseWriter *SSEWriter, errType, code, message string) {
+	payload := map[string]any{
+		"message": message,
+		"type":    errType,
+	}
+	if code != "" {
+		payload["code"] = code
+	} else {
+		payload["code"] = nil
+	}
+	data, err := json.Marshal(map[string]any{"error": payload})
+	if err != nil {
+		return
+	}
+	if err := sseWriter.WriteData(data); err != nil {
+		return
+	}
+	sseWriter.WriteDone() //nolint:errcheck
 }
 
 // writeOpenAIError writes an OpenAI-formatted error response (shared by Chat and Responses handlers).

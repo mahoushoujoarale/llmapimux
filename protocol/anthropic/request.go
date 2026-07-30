@@ -3,20 +3,66 @@ package anthropic
 import "encoding/json"
 
 // Request is the JSON structure of an Anthropic Messages API request.
+//
+// Optional fields use omitempty: emitting explicit nulls for tool_choice,
+// thinking, system, etc. causes strict gateways and proxies in front of the
+// Anthropic API to reject the request. max_tokens has no omitempty because the
+// API requires it, and stream is always meaningful.
+//
+// System is json.RawMessage because the API accepts either a plain string or an
+// array of content blocks; see SystemBlocks.
 type Request struct {
 	Model         string          `json:"model"`
 	MaxTokens     int             `json:"max_tokens"`
-	System        []ContentBlock  `json:"system"`
+	System        json.RawMessage `json:"system,omitempty"`
 	Messages      []Message       `json:"messages"`
-	Temperature   *float64        `json:"temperature"`
-	TopP          *float64        `json:"top_p"`
-	TopK          *int            `json:"top_k"`
-	StopSequences []string        `json:"stop_sequences"`
-	Stream        bool            `json:"stream"`
-	Tools         []Tool          `json:"tools"`
-	ToolChoice    *ToolChoice     `json:"tool_choice"`
-	Thinking      *Thinking       `json:"thinking"`
+	Temperature   *float64        `json:"temperature,omitempty"`
+	TopP          *float64        `json:"top_p,omitempty"`
+	TopK          *int            `json:"top_k,omitempty"`
+	StopSequences []string        `json:"stop_sequences,omitempty"`
+	Stream        bool            `json:"stream,omitempty"`
+	Tools         []Tool          `json:"tools,omitempty"`
+	ToolChoice    *ToolChoice     `json:"tool_choice,omitempty"`
+	Thinking      *Thinking       `json:"thinking,omitempty"`
 	Metadata      json.RawMessage `json:"metadata,omitempty"`
+}
+
+// SystemBlocks decodes the dual-form system field into content blocks. A bare
+// string is normalised to a single text block. Returns nil when system is absent.
+func (r *Request) SystemBlocks() ([]ContentBlock, error) {
+	raw := r.System
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	if raw[0] == '"' {
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return nil, err
+		}
+		if text == "" {
+			return nil, nil
+		}
+		return []ContentBlock{{Type: "text", Text: text}}, nil
+	}
+	var blocks []ContentBlock
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil, err
+	}
+	return blocks, nil
+}
+
+// SetSystemBlocks encodes content blocks into the system field.
+func (r *Request) SetSystemBlocks(blocks []ContentBlock) error {
+	if len(blocks) == 0 {
+		r.System = nil
+		return nil
+	}
+	data, err := json.Marshal(blocks)
+	if err != nil {
+		return err
+	}
+	r.System = data
+	return nil
 }
 
 // Message represents a single message in the Anthropic API.
@@ -152,7 +198,9 @@ type ToolChoice struct {
 }
 
 // Thinking represents the thinking configuration in the Anthropic API.
+// BudgetTokens is omitted when zero because the API rejects budget_tokens on a
+// disabled thinking config.
 type Thinking struct {
-	Type         string `json:"type"`          // "enabled" or "disabled"
-	BudgetTokens int    `json:"budget_tokens"` // only when type = "enabled"
+	Type         string `json:"type"`                   // "enabled" or "disabled"
+	BudgetTokens int    `json:"budget_tokens,omitempty"` // only when type = "enabled"
 }

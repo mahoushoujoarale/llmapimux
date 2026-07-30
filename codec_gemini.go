@@ -48,10 +48,94 @@ func (c *geminiCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan Str
 	var accumulatedUsage Usage
 	var lastStopReason StopReason
 
+	// Gemini has no incremental function-call mechanism: a functionCall part must
+	// carry complete `args` JSON. Every other protocol streams tool calls
+	// incrementally — Anthropic puts the name/id on content_block_start and the
+	// arguments in partial-JSON fragments, OpenAI does the same across tool_call
+	// deltas — so fragments must be buffered per output index and flushed as one
+	// part. Forwarding a fragment directly yields unparsable args (and previously
+	// aborted the whole stream, because marshalling invalid raw JSON fails).
+	type pendingToolCall struct {
+		tool ToolUseContent
+		args strings.Builder
+	}
+	pending := map[int]*pendingToolCall{}
+	var pendingOrder []int
+
+	flushPending := func() bool {
+		for _, idx := range pendingOrder {
+			p := pending[idx]
+			if p == nil {
+				continue
+			}
+			delete(pending, idx)
+			tool := p.tool
+			args := strings.TrimSpace(p.args.String())
+			if args == "" || !json.Valid([]byte(args)) {
+				// Never emit invalid args; an empty object is the safest fallback.
+				args = "{}"
+			}
+			tool.Arguments = json.RawMessage(args)
+			data, err := EncodeGeminiStreamChunk(&StreamEvent{
+				Type:  StreamEventDelta,
+				Index: idx,
+				Delta: &ContentPart{
+					Type:    ContentTypeToolUse,
+					ToolUse: &tool,
+				},
+			})
+			if err != nil {
+				return false
+			}
+			if data == nil {
+				continue
+			}
+			if sseWriter.WriteData(data) != nil {
+				return false
+			}
+		}
+		pendingOrder = pendingOrder[:0]
+		return true
+	}
+
+	// bufferTool records a tool-call fragment, returning false if the caller should
+	// stop processing.
+	bufferTool := func(index int, tu *ToolUseContent) {
+		p, ok := pending[index]
+		if !ok {
+			p = &pendingToolCall{}
+			pending[index] = p
+			pendingOrder = append(pendingOrder, index)
+		}
+		if tu.ID != "" {
+			p.tool.ID = tu.ID
+		}
+		if tu.Name != "" {
+			p.tool.Name = tu.Name
+		}
+		if frag := string(tu.Arguments); frag != "" && frag != "{}" {
+			p.args.WriteString(frag)
+		}
+	}
+
 	for result := range ch {
 		if result.Err != nil {
-			// Cannot change status code at this point — just stop.
-			break
+			// The status code is already committed, so report the failure in-band
+			// using Gemini's error envelope rather than closing the connection
+			// silently, which a client cannot distinguish from a clean end.
+			writeGeminiStreamError(sseWriter, result.Err.Error())
+			return
+		}
+
+		// An in-band IR error event (e.g. an Anthropic "error" SSE event) has no
+		// Gemini chunk representation — surface it as an error envelope.
+		if result.Event != nil && result.Event.Type == StreamEventError {
+			msg := "upstream stream error"
+			if result.Event.Error != nil && result.Event.Error.Message != "" {
+				msg = result.Event.Error.Message
+			}
+			writeGeminiStreamError(sseWriter, msg)
+			return
 		}
 
 		// Accumulate usage from early events (e.g. Anthropic message_start
@@ -67,6 +151,20 @@ func (c *geminiCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan Str
 			// Capture stop reasons from delta events (e.g. Anthropic message_delta).
 			if result.Event.StopReason != nil {
 				lastStopReason = *result.Event.StopReason
+			}
+		}
+
+		// Tool-call buffering.
+		if ev := result.Event; ev != nil {
+			isToolPart := ev.Delta != nil && ev.Delta.Type == ContentTypeToolUse && ev.Delta.ToolUse != nil
+			switch {
+			case (ev.Type == StreamEventContentBlockStart || ev.Type == StreamEventDelta) && isToolPart:
+				bufferTool(ev.Index, ev.Delta.ToolUse)
+				continue
+			case ev.Type == StreamEventContentBlockStop, ev.Type == StreamEventStop:
+				if !flushPending() {
+					return
+				}
 			}
 		}
 
@@ -95,6 +193,25 @@ func (c *geminiCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan Str
 			break
 		}
 	}
+
+	// Guard against an upstream that ends without a stop event.
+	flushPending()
+}
+
+// writeGeminiStreamError emits an in-band SSE chunk carrying Gemini's error
+// envelope. Used when a stream fails after the HTTP 200 has been committed.
+func writeGeminiStreamError(sseWriter *SSEWriter, message string) {
+	data, err := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"code":    http.StatusBadGateway,
+			"message": message,
+			"status":  httpStatusToGeminiStatus(http.StatusBadGateway),
+		},
+	})
+	if err != nil {
+		return
+	}
+	sseWriter.WriteData(data) //nolint:errcheck
 }
 
 // writeGeminiError writes a Gemini-formatted error response.

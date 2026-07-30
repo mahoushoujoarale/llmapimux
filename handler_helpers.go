@@ -17,6 +17,12 @@ type openaiAnnotationWire struct {
 	EndIndex   *int   `json:"end_index,omitempty"`
 }
 
+// defaultJSONSchemaName is used when a request carries a JSON Schema but no
+// schema name. OpenAI's Chat (response_format.json_schema.name) and Responses
+// (text.format.name) APIs both require the field, while Anthropic and Gemini have
+// no equivalent, so a cross-protocol request would otherwise be rejected.
+const defaultJSONSchemaName = "response"
+
 // decodeOpenAIStop decodes the "stop" field which can be a string or array of strings.
 // Shared by OpenAI Chat and OpenAI Responses decoders.
 func decodeOpenAIStop(raw json.RawMessage) ([]string, error) {
@@ -87,14 +93,42 @@ func generateRequestID() string {
 
 // toolResultText extracts and concatenates all text parts from a ToolResultContent.
 // Shared by OpenAI Chat, OpenAI Responses, and Gemini encoders.
+//
+// Non-text parts (images, documents) have no representation in the flat string
+// tool-result formats used by OpenAI and Gemini, so a short placeholder is
+// substituted to keep the model aware that content was present rather than
+// silently emitting nothing.
 func toolResultText(result *ToolResultContent) string {
 	var texts []string
 	for _, c := range result.Content {
-		if c.Type == ContentTypeText && c.Text != nil {
-			texts = append(texts, c.Text.Text)
+		switch c.Type {
+		case ContentTypeText:
+			if c.Text != nil {
+				texts = append(texts, c.Text.Text)
+			}
+		case ContentTypeImage:
+			texts = append(texts, "[image omitted: not representable in this tool result format]")
+		case ContentTypeDocument:
+			texts = append(texts, "[document omitted: not representable in this tool result format]")
 		}
 	}
 	return strings.Join(texts, "")
+}
+
+// toolErrorPrefix is prepended to tool-result text when ToolResultContent.IsError
+// is set and the target protocol has no structured error flag. Anthropic carries
+// is_error natively; OpenAI Chat/Responses and Gemini do not, so without this the
+// model cannot tell a successful result from a failed one.
+const toolErrorPrefix = "Error: "
+
+// toolResultTextWithError renders tool-result content for protocols that lack a
+// structured is_error flag, marking failures inline so the signal survives.
+func toolResultTextWithError(result *ToolResultContent) string {
+	text := toolResultText(result)
+	if result.IsError {
+		return toolErrorPrefix + text
+	}
+	return text
 }
 
 // hasMediaContent returns true if any message or system prompt contains image or document parts.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	anthropic "github.com/mahoushoujoarale/llmapimux/protocol/anthropic"
 )
@@ -61,6 +62,9 @@ type anthropicCitationWire struct {
 // DecodeAnthropicRequest decodes an Anthropic Messages API JSON request body
 // into the unified IR Request type.
 func DecodeAnthropicRequest(body []byte) (*Request, error) {
+	if err := requireJSONObject(body); err != nil {
+		return nil, fmt.Errorf("decode request: %w", err)
+	}
 	var raw anthropic.Request
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("decode anthropic request: %w", err)
@@ -76,9 +80,13 @@ func DecodeAnthropicRequest(body []byte) (*Request, error) {
 		Stream:        raw.Stream,
 	}
 
-	// System prompt
-	if len(raw.System) > 0 {
-		parts, err := convertAnthropicContentBlocks(raw.System)
+	// System prompt — the API accepts a bare string or an array of blocks.
+	systemBlocks, err := raw.SystemBlocks()
+	if err != nil {
+		return nil, fmt.Errorf("decode anthropic request system: %w", err)
+	}
+	if len(systemBlocks) > 0 {
+		parts, err := convertAnthropicContentBlocks(systemBlocks)
 		if err != nil {
 			return nil, fmt.Errorf("decode anthropic request system: %w", err)
 		}
@@ -499,7 +507,9 @@ func EncodeAnthropicRequest(req *Request) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("encode anthropic request system: %w", err)
 		}
-		raw.System = blocks
+		if err := raw.SetSystemBlocks(blocks); err != nil {
+			return nil, fmt.Errorf("encode anthropic request system: %w", err)
+		}
 	}
 
 	// Messages
@@ -545,7 +555,13 @@ func EncodeAnthropicRequest(req *Request) ([]byte, error) {
 	// parallel_tool_calls with no tool_choice field). Anthropic requires
 	// disable_parallel_tool_use to be nested inside a valid tool_choice object,
 	// so when there is no Type we silently drop both fields.
-	if req.ToolChoice != nil && req.ToolChoice.Type != "" {
+	//
+	// The choice is also dropped when the request declared tools but every one of
+	// them was filtered out during encoding: a tool_choice with no tools array is
+	// a gateway-introduced inconsistency that Anthropic rejects. Requests that
+	// never carried tools pass through so the provider's own validation applies.
+	toolsWereDropped := len(req.Tools) > 0 && len(raw.Tools) == 0
+	if req.ToolChoice != nil && req.ToolChoice.Type != "" && !toolsWereDropped {
 		atc := &anthropic.ToolChoice{}
 		switch req.ToolChoice.Type {
 		case "auto":
@@ -581,11 +597,52 @@ func EncodeAnthropicRequest(req *Request) ([]byte, error) {
 		}
 		if req.Thinking.Mode == "enabled" {
 			at.BudgetTokens = req.Thinking.BudgetTokens
+			// Anthropic requires a positive budget_tokens whenever thinking is
+			// enabled, but OpenAI-style inbound requests only carry a qualitative
+			// reasoning_effort. Derive a concrete budget so the request is valid.
+			if at.BudgetTokens <= 0 {
+				at.BudgetTokens = anthropicThinkingBudgetForEffort(req.Thinking.Effort, maxTokens)
+			}
+			// budget_tokens must stay below max_tokens.
+			if maxTokens > 0 && at.BudgetTokens >= maxTokens {
+				at.BudgetTokens = maxTokens - 1
+			}
+			// A budget below the API minimum is rejected; drop thinking entirely
+			// rather than send something invalid.
+			if at.BudgetTokens < minAnthropicThinkingBudget {
+				at = nil
+			}
 		}
 		raw.Thinking = at
 	}
 
 	return json.Marshal(raw)
+}
+
+// minAnthropicThinkingBudget is the smallest budget_tokens the Anthropic API
+// accepts for an enabled thinking config.
+const minAnthropicThinkingBudget = 1024
+
+// anthropicThinkingBudgetForEffort maps a qualitative reasoning effort (OpenAI
+// Chat's reasoning_effort / Responses' reasoning.effort) onto a concrete Anthropic
+// budget_tokens value, clamped to leave room inside maxTokens.
+func anthropicThinkingBudgetForEffort(effort string, maxTokens int) int {
+	var budget int
+	switch strings.ToLower(effort) {
+	case "minimal":
+		budget = minAnthropicThinkingBudget
+	case "low":
+		budget = 2048
+	case "high":
+		budget = 8192
+	default: // "medium" and anything unrecognised
+		budget = 4096
+	}
+	// Keep the budget strictly below max_tokens, which the API enforces.
+	if maxTokens > 0 && budget >= maxTokens {
+		budget = maxTokens - 1
+	}
+	return budget
 }
 
 // encodeAnthropicMessage converts an IR Message to an anthropic.Message.
@@ -790,12 +847,12 @@ func DecodeAnthropicResponse(body []byte) (*Response, error) {
 		ID:    raw.ID,
 		Model: raw.Model,
 		Usage: Usage{
-			PromptTokens:          raw.Usage.InputTokens + raw.Usage.CacheCreationInputTokens + raw.Usage.CacheReadInputTokens,
+			PromptTokens:           raw.Usage.InputTokens + raw.Usage.CacheCreationInputTokens + raw.Usage.CacheReadInputTokens,
 			PromptCacheWriteTokens: raw.Usage.CacheCreationInputTokens,
 			PromptCacheHitTokens:   raw.Usage.CacheReadInputTokens,
-			CompletionTokens:      raw.Usage.OutputTokens,
-			ServerToolUseTokens:   raw.Usage.ServerToolUseTokens,
-			TotalTokens:           raw.Usage.InputTokens + raw.Usage.CacheCreationInputTokens + raw.Usage.CacheReadInputTokens + raw.Usage.OutputTokens,
+			CompletionTokens:       raw.Usage.OutputTokens,
+			ServerToolUseTokens:    raw.Usage.ServerToolUseTokens,
+			TotalTokens:            raw.Usage.InputTokens + raw.Usage.CacheCreationInputTokens + raw.Usage.CacheReadInputTokens + raw.Usage.OutputTokens,
 		},
 	}
 
@@ -940,11 +997,15 @@ func DecodeAnthropicStreamEvent(eventType string, data []byte) (*StreamEvent, er
 		usage := Usage{
 			CompletionTokens: raw.Usage.OutputTokens,
 		}
-		return &StreamEvent{
+		event := &StreamEvent{
 			Type:       StreamEventDelta,
 			StopReason: &stopReason,
 			Usage:      &usage,
-		}, nil
+		}
+		if raw.Delta.StopSequence != nil {
+			event.StopSequence = *raw.Delta.StopSequence
+		}
+		return event, nil
 
 	case "message_stop":
 		return &StreamEvent{
@@ -979,6 +1040,11 @@ func DecodeAnthropicStreamEvent(eventType string, data []byte) (*StreamEvent, er
 // EncodeAnthropicStreamEvent encodes a unified IR StreamEvent into an Anthropic SSE event.
 // Returns the SSE event type string and the JSON data bytes.
 func EncodeAnthropicStreamEvent(event *StreamEvent) (string, []byte, error) {
+	// A nil event is a "nothing to emit" signal from an upstream decoder that saw a
+	// chunk it does not map. Treat it as a skip rather than dereferencing it.
+	if event == nil {
+		return "", nil, nil
+	}
 	switch event.Type {
 	case StreamEventStart:
 		msg := anthropic.StreamMessageStart{
@@ -1041,6 +1107,10 @@ func EncodeAnthropicStreamEvent(event *StreamEvent) (string, []byte, error) {
 					StopReason: encodeAnthropicStopReason(*event.StopReason),
 				},
 			}
+			if event.StopSequence != "" {
+				seq := event.StopSequence
+				raw.Delta.StopSequence = &seq
+			}
 			if event.Usage != nil {
 				raw.Usage = anthropic.Usage{
 					InputTokens:              event.Usage.PromptTokens - event.Usage.PromptCacheWriteTokens - event.Usage.PromptCacheHitTokens,
@@ -1059,6 +1129,15 @@ func EncodeAnthropicStreamEvent(event *StreamEvent) (string, []byte, error) {
 
 		// content_block_delta
 		if event.Delta == nil {
+			// A usage-only delta (e.g. an OpenAI Chat chunk carrying just
+			// stream_options.include_usage and no content) has no Anthropic
+			// content_block_delta representation. Signal "skip" with nil data
+			// instead of an error so the caller can drop it without tearing down
+			// the stream — anthropicCodec.WriteStreamingResponse accumulates the
+			// usage and folds it into the terminating message_delta.
+			if event.Usage != nil {
+				return "", nil, nil
+			}
 			return "", nil, fmt.Errorf("encode anthropic stream delta: nil Delta and nil StopReason")
 		}
 		var delta anthropic.StreamDelta

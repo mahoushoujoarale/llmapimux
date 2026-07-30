@@ -1089,10 +1089,11 @@ func TestHandler_RawExtra_SameProtocol_Preserved(t *testing.T) {
 		router: &staticRouter{result: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: upstream.URL, APIKey: "sk-test", Model: "gpt-4o"}},
 	}
 
-	// Request includes protocol-specific fields service_tier and seed.
-	// These are now known fields in ChatRequest (promoted from RawExtra), so they
-	// are decoded into the struct but have no IR mapping — they are not forwarded
-	// upstream and are not round-tripped to the response.
+	// Request includes protocol-specific fields service_tier and seed. Both are
+	// declared on ChatRequest but have no IR mapping, so the IR encoder cannot
+	// re-emit them. They are therefore treated as unmapped and captured in
+	// RawExtra, which the handler folds into the outbound body on a same-protocol
+	// passthrough — otherwise the caller's options would silently disappear.
 	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"service_tier":"priority","seed":42}`
 	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	w := httptest.NewRecorder()
@@ -1102,26 +1103,21 @@ func TestHandler_RawExtra_SameProtocol_Preserved(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	// service_tier and seed are known struct fields with no IR mapping, so they
-	// are not forwarded upstream (EncodeOpenAIChatRequest only sets IR-mapped fields).
-	if _, ok := upstreamReq["service_tier"]; ok {
-		t.Fatal("service_tier should not be forwarded by IR encode")
+	if got := string(upstreamReq["service_tier"]); got != `"priority"` {
+		t.Errorf("upstream service_tier = %s, want \"priority\"", got)
 	}
-	if _, ok := upstreamReq["seed"]; ok {
-		t.Fatal("seed should not be forwarded by IR encode")
+	if got := string(upstreamReq["seed"]); got != "42" {
+		t.Errorf("upstream seed = %s, want 42", got)
 	}
 
-	// Since service_tier and seed are now known fields, they are no longer captured
-	// in RawExtra and are not merged back into the response.
+	// RawExtra is an outbound-request mechanism, so request-only options must not
+	// be echoed back to the client as if the model had produced them.
 	var resp map[string]json.RawMessage
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode downstream response: %v", err)
 	}
-	if _, ok := resp["service_tier"]; ok {
-		t.Fatal("service_tier should not appear in response (now a known field, not in RawExtra)")
-	}
 	if _, ok := resp["seed"]; ok {
-		t.Fatal("seed should not appear in response (now a known field, not in RawExtra)")
+		t.Fatal("seed is a request-only field and must not appear in the response")
 	}
 }
 

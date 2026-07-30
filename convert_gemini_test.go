@@ -598,7 +598,10 @@ func TestDecodeGeminiRequest_ThinkingConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("zero budget adaptive", func(t *testing.T) {
+	t.Run("zero budget disables thinking", func(t *testing.T) {
+		// thinkingBudget:0 is how the Gemini API is told to turn thinking off.
+		// Decoding it as "adaptive" and then re-encoding would drop the field and
+		// silently re-enable thinking on models that default to it.
 		body := []byte(`{
 			"contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
 			"generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}
@@ -610,13 +613,29 @@ func TestDecodeGeminiRequest_ThinkingConfig(t *testing.T) {
 		}
 
 		if req.Thinking == nil {
-			t.Fatal("Thinking is nil, want adaptive mode")
+			t.Fatal("Thinking is nil, want disabled mode")
 		}
-		if req.Thinking.Mode != "adaptive" {
-			t.Errorf("Thinking.Mode = %q, want %q", req.Thinking.Mode, "adaptive")
+		if req.Thinking.Mode != "disabled" {
+			t.Errorf("Thinking.Mode = %q, want %q", req.Thinking.Mode, "disabled")
 		}
 		if req.Thinking.BudgetTokens != 0 {
 			t.Errorf("Thinking.BudgetTokens = %d, want 0", req.Thinking.BudgetTokens)
+		}
+	})
+
+	t.Run("negative budget is adaptive", func(t *testing.T) {
+		// Gemini uses -1 for dynamic thinking.
+		body := []byte(`{
+			"contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
+			"generationConfig": {"thinkingConfig": {"thinkingBudget": -1}}
+		}`)
+
+		req, err := DecodeGeminiRequest("/v1/models/gemini-2.5-pro:generateContent", body)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if req.Thinking == nil || req.Thinking.Mode != "adaptive" {
+			t.Errorf("Thinking = %+v, want adaptive", req.Thinking)
 		}
 	})
 
@@ -1014,7 +1033,7 @@ func TestEncodeGeminiRequest_ThinkingConfig(t *testing.T) {
 		if raw.GenerationConfig.ThinkingConfig == nil {
 			t.Fatal("ThinkingConfig is nil")
 		}
-		if raw.GenerationConfig.ThinkingConfig.ThinkingBudget != 4096 {
+		if raw.GenerationConfig.ThinkingConfig.Budget() != 4096 {
 			t.Errorf("ThinkingBudget = %d, want 4096", raw.GenerationConfig.ThinkingConfig.ThinkingBudget)
 		}
 	})
@@ -1047,7 +1066,7 @@ func TestEncodeGeminiRequest_ThinkingConfig(t *testing.T) {
 		if raw.GenerationConfig.ThinkingConfig == nil {
 			t.Fatal("ThinkingConfig is nil")
 		}
-		if raw.GenerationConfig.ThinkingConfig.ThinkingBudget != 0 {
+		if raw.GenerationConfig.ThinkingConfig.Budget() != 0 {
 			t.Errorf("ThinkingBudget = %d, want 0", raw.GenerationConfig.ThinkingConfig.ThinkingBudget)
 		}
 	})
@@ -2546,7 +2565,7 @@ func TestEncodeGeminiRequest_ThinkingConfig_IncludeThoughts(t *testing.T) {
 		if !*raw.GenerationConfig.ThinkingConfig.IncludeThoughts {
 			t.Errorf("IncludeThoughts = false, want true")
 		}
-		if raw.GenerationConfig.ThinkingConfig.ThinkingBudget != 2048 {
+		if raw.GenerationConfig.ThinkingConfig.Budget() != 2048 {
 			t.Errorf("ThinkingBudget = %d, want 2048", raw.GenerationConfig.ThinkingConfig.ThinkingBudget)
 		}
 	})
@@ -2738,7 +2757,7 @@ func TestGeminiThinkingConfig_Phase2_RoundTrip(t *testing.T) {
 		t.Fatal("ThinkingConfig is nil after round-trip")
 	}
 	gtc := raw.GenerationConfig.ThinkingConfig
-	if gtc.ThinkingBudget != 2048 {
+	if gtc.Budget() != 2048 {
 		t.Errorf("ThinkingBudget after round-trip = %d, want 2048", gtc.ThinkingBudget)
 	}
 	if gtc.IncludeThoughts == nil || !*gtc.IncludeThoughts {

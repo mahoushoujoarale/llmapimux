@@ -1,6 +1,9 @@
 package llmapimux
 
-import "net/http"
+import (
+	"encoding/json"
+	"net/http"
+)
 
 // openaiResponsesCodec implements inboundCodec for the OpenAI Responses protocol.
 type openaiResponsesCodec struct{}
@@ -33,10 +36,47 @@ func (c *openaiResponsesCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <
 	var accumulatedUsage Usage
 	var lastStopReason StopReason
 
+	// The Responses API grammar requires response.created before any output, and
+	// requires a response.output_item.added carrying the function name before any
+	// function_call_arguments.delta. Cross-protocol IR streams do not always
+	// produce a StreamEventStart (Gemini has no equivalent) and carry the tool
+	// name on content_block_start, so both are synthesised here. Without them SDKs
+	// see a stream with no beginning and unnamed tool calls.
+	createdSent := false
+	// announcedTools tracks output indices whose response.output_item.added has
+	// already been emitted, so the synthetic one is sent at most once per tool.
+	announcedTools := map[int]bool{}
+	ensureCreated := func(ev *StreamEvent) bool {
+		if createdSent {
+			return true
+		}
+		createdSent = true
+		if ev != nil && ev.Type == StreamEventStart {
+			return true // the real start event is about to be written
+		}
+		_, data, err := EncodeOpenAIResponsesStreamEvent(&StreamEvent{
+			Type:     StreamEventStart,
+			Response: &Response{},
+		})
+		if err != nil || data == nil {
+			return true
+		}
+		return sseWriter.WriteEvent("response.created", data) == nil
+	}
+
 	for result := range ch {
 		if result.Err != nil {
-			// Cannot change status code at this point — just stop.
-			break
+			// The status code is already committed, so report the failure in-band
+			// as a Responses `error` event instead of closing the connection with
+			// no signal.
+			writeOpenAIResponsesStreamError(sseWriter, "server_error", "", result.Err.Error())
+			return
+		}
+		if !ensureCreated(result.Event) {
+			return
+		}
+		if result.Event != nil && result.Event.Type == StreamEventStart {
+			createdSent = true
 		}
 
 		// Accumulate usage from early events (e.g. Anthropic message_start
@@ -69,11 +109,41 @@ func (c *openaiResponsesCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <
 			}
 		}
 
+		// A tool name arriving on a StreamEventDelta (which is how OpenAI Chat and
+		// Gemini sources carry it) has no place in
+		// response.function_call_arguments.delta, so synthesise the
+		// response.output_item.added that the Responses grammar requires first.
+		if ev := result.Event; ev != nil && ev.Type == StreamEventDelta &&
+			ev.Delta != nil && ev.Delta.Type == ContentTypeToolUse && ev.Delta.ToolUse != nil &&
+			ev.Delta.ToolUse.Name != "" && !announcedTools[ev.Index] {
+			announcedTools[ev.Index] = true
+			_, data, err := EncodeOpenAIResponsesStreamEvent(&StreamEvent{
+				Type:  StreamEventContentBlockStart,
+				Index: ev.Index,
+				Delta: &ContentPart{
+					Type: ContentTypeToolUse,
+					ToolUse: &ToolUseContent{
+						ID:   ev.Delta.ToolUse.ID,
+						Name: ev.Delta.ToolUse.Name,
+					},
+				},
+			})
+			if err == nil && data != nil {
+				if err := sseWriter.WriteEvent("response.output_item.added", data); err != nil {
+					return
+				}
+			}
+		}
+		if ev := result.Event; ev != nil && ev.Type == StreamEventContentBlockStart &&
+			ev.Delta != nil && ev.Delta.Type == ContentTypeToolUse {
+			announcedTools[ev.Index] = true
+		}
+
 		eventType, data, err := EncodeOpenAIResponsesStreamEvent(result.Event)
-		if err != nil {
-			// Some IR events (e.g. usage-only deltas) cannot be encoded into
-			// the OpenAI Responses streaming format. Skip them silently — their
-			// data has already been accumulated above.
+		if err != nil || data == nil {
+			// Some IR events (e.g. usage-only deltas) have no OpenAI Responses
+			// streaming representation, signalled either by an error or by nil
+			// data. Skip them — their usage has already been accumulated above.
 			continue
 		}
 		if err := sseWriter.WriteEvent(eventType, data); err != nil {
@@ -81,4 +151,24 @@ func (c *openaiResponsesCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <
 		}
 	}
 	// OpenAI Responses API does NOT use a [DONE] sentinel
+}
+
+// writeOpenAIResponsesStreamError emits an in-band Responses `error` SSE event.
+// Used when a stream fails after the HTTP 200 has already been committed.
+func writeOpenAIResponsesStreamError(sseWriter *SSEWriter, errType, code, message string) {
+	payload := map[string]any{
+		"type":    "error",
+		"message": message,
+	}
+	if errType != "" {
+		payload["type"] = errType
+	}
+	if code != "" {
+		payload["code"] = code
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	sseWriter.WriteEvent("error", data) //nolint:errcheck
 }

@@ -491,7 +491,7 @@ func TestDecodeGeminiResponse_CitationMetadata_MultipleSources(t *testing.T) {
 
 // --- Gemini encode silently drops citations ---
 
-func TestEncodeGeminiResponse_CitationsDropped(t *testing.T) {
+func TestEncodeGeminiResponse_CitationsRoundTrip(t *testing.T) {
 	resp := &Response{
 		Model:      "gemini-2.5-pro",
 		StopReason: StopReasonEndTurn,
@@ -512,22 +512,48 @@ func TestEncodeGeminiResponse_CitationsDropped(t *testing.T) {
 		t.Fatalf("encode: %v", err)
 	}
 
-	// Verify no citationMetadata in the encoded response (silently dropped)
-	var rawOut map[string]interface{}
+	// citationMetadata is emitted so citations survive an IR → Gemini encode
+	// instead of being decode-only.
+	var rawOut struct {
+		Candidates []struct {
+			CitationMetadata *struct {
+				CitationSources []struct {
+					StartIndex int    `json:"startIndex"`
+					EndIndex   int    `json:"endIndex"`
+					URI        string `json:"uri"`
+					Title      string `json:"title"`
+				} `json:"citationSources"`
+			} `json:"citationMetadata"`
+		} `json:"candidates"`
+	}
 	if err := json.Unmarshal(encoded, &rawOut); err != nil {
 		t.Fatalf("unmarshal encoded: %v", err)
 	}
+	if len(rawOut.Candidates) != 1 {
+		t.Fatalf("candidates len = %d, want 1", len(rawOut.Candidates))
+	}
+	cm := rawOut.Candidates[0].CitationMetadata
+	if cm == nil || len(cm.CitationSources) != 1 {
+		t.Fatalf("citationMetadata = %+v, want 1 source", cm)
+	}
+	src := cm.CitationSources[0]
+	if src.URI != "https://example.com" || src.Title != "Source" {
+		t.Errorf("source = %+v, want example.com/Source", src)
+	}
+	if src.StartIndex != 0 || src.EndIndex != 10 {
+		t.Errorf("offsets = [%d,%d], want [0,10]", src.StartIndex, src.EndIndex)
+	}
 
-	candidates, ok := rawOut["candidates"].([]interface{})
-	if !ok || len(candidates) != 1 {
-		t.Fatalf("candidates = %v", rawOut["candidates"])
+	// Round-trip: decoding the encoded response restores the per-part citation.
+	back, err := DecodeGeminiResponse(encoded)
+	if err != nil {
+		t.Fatalf("decode back: %v", err)
 	}
-	cand, ok := candidates[0].(map[string]interface{})
-	if !ok {
-		t.Fatalf("candidates[0] not a map")
+	if len(back.Content) != 1 || len(back.Content[0].Citations) != 1 {
+		t.Fatalf("round-trip content = %+v, want 1 citation", back.Content)
 	}
-	if _, ok := cand["citationMetadata"]; ok {
-		t.Error("citationMetadata should not appear in encoded Gemini response (silently dropped)")
+	if back.Content[0].Citations[0].URL != "https://example.com" {
+		t.Errorf("round-trip URL = %q", back.Content[0].Citations[0].URL)
 	}
 }
 
@@ -694,9 +720,9 @@ func TestCrossProtocol_AnthropicToOpenAIResponses_CitationPreservation(t *testin
 	}
 }
 
-// --- Cross-protocol: Anthropic → Gemini silently drops citations ---
+// --- Cross-protocol: Anthropic → Gemini preserves citations ---
 
-func TestCrossProtocol_AnthropicToGemini_CitationsDropped(t *testing.T) {
+func TestCrossProtocol_AnthropicToGemini_CitationsPreserved(t *testing.T) {
 	// Decode an Anthropic response with citations
 	anthropicBody := []byte(`{
 		"id": "msg_drop",
@@ -732,7 +758,7 @@ func TestCrossProtocol_AnthropicToGemini_CitationsDropped(t *testing.T) {
 		t.Fatalf("encode gemini: %v", err)
 	}
 
-	// Verify no citationMetadata in Gemini output
+	// Anthropic char_location citations map onto Gemini citationMetadata offsets.
 	var rawOut map[string]interface{}
 	if err := json.Unmarshal(geminiBody, &rawOut); err != nil {
 		t.Fatalf("unmarshal encoded: %v", err)
@@ -746,8 +772,20 @@ func TestCrossProtocol_AnthropicToGemini_CitationsDropped(t *testing.T) {
 	if !ok {
 		t.Fatalf("candidates[0] not a map")
 	}
-	if _, ok := cand["citationMetadata"]; ok {
-		t.Error("citationMetadata should not appear in Gemini response when encoding from IR")
+	cm, ok := cand["citationMetadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("citationMetadata missing from Gemini response: %s", geminiBody)
+	}
+	sources, ok := cm["citationSources"].([]interface{})
+	if !ok || len(sources) != 1 {
+		t.Fatalf("citationSources = %v, want 1", cm["citationSources"])
+	}
+	src, _ := sources[0].(map[string]interface{})
+	if src["title"] != "Doc" {
+		t.Errorf("title = %v, want Doc", src["title"])
+	}
+	if src["endIndex"] != float64(5) {
+		t.Errorf("endIndex = %v, want 5", src["endIndex"])
 	}
 
 	// The text should still be present

@@ -79,11 +79,14 @@ func (c *OpenAIChatClient) SendStream(ctx context.Context, req *Request, cfg Out
 				if string(data) == "[DONE]" {
 					break
 				}
-				trailing, err := DecodeOpenAIChatStreamChunk(data)
-				if err != nil || trailing == nil {
+				trailingEvents, err := DecodeOpenAIChatStreamChunks(data)
+				if err != nil {
 					continue
 				}
-				if trailing.Usage != nil {
+				for _, trailing := range trailingEvents {
+					if trailing == nil || trailing.Usage == nil {
+						continue
+					}
 					if stop.Usage == nil {
 						stop.Usage = trailing.Usage
 					} else {
@@ -115,7 +118,7 @@ func (c *OpenAIChatClient) SendStream(ctx context.Context, req *Request, cfg Out
 				return
 			}
 
-			event, err := DecodeOpenAIChatStreamChunk(data)
+			events, err := DecodeOpenAIChatStreamChunks(data)
 			if err != nil {
 				select {
 				case ch <- StreamResult{Err: fmt.Errorf("openai chat outbound stream decode: %w", err)}:
@@ -124,24 +127,26 @@ func (c *OpenAIChatClient) SendStream(ctx context.Context, req *Request, cfg Out
 				return
 			}
 
-			// Skip nil events
-			if event == nil {
-				continue
-			}
+			for _, event := range events {
+				// Skip nil events
+				if event == nil {
+					continue
+				}
 
-			// On stop event, drain trailing usage chunks before sending.
-			// OpenAI Chat sends a separate usage chunk after finish_reason
-			// when stream_options.include_usage=true — we merge it into
-			// the stop event so the downstream client gets complete usage.
-			if event.Type == StreamEventStop {
-				drainTrailingUsage(event)
-				return
-			}
+				// On stop event, drain trailing usage chunks before sending.
+				// OpenAI Chat sends a separate usage chunk after finish_reason
+				// when stream_options.include_usage=true — we merge it into
+				// the stop event so the downstream client gets complete usage.
+				if event.Type == StreamEventStop {
+					drainTrailingUsage(event)
+					return
+				}
 
-			select {
-			case ch <- StreamResult{Event: event}:
-			case <-ctx.Done():
-				return
+				select {
+				case ch <- StreamResult{Event: event}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()

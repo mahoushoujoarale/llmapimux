@@ -29,10 +29,53 @@ func jsonFieldNames(t reflect.Type) map[string]bool {
 }
 
 // Per-protocol known fields, scanned at init time.
-var openaiChatKnownFields = jsonFieldNames(reflect.TypeOf(openaichat.ChatRequest{}))
-var openaiResponsesKnownFields = jsonFieldNames(reflect.TypeOf(openairesponses.Request{}))
-var anthropicKnownFields = jsonFieldNames(reflect.TypeOf(anthropic.Request{}))
-var geminiKnownFields = jsonFieldNames(reflect.TypeOf(gemini.Request{}))
+//
+// "Known" means "the IR carries this field", which is what makes it safe to
+// exclude from RawExtra: the encoder will re-emit it from the IR. A field that is
+// declared on the protocol struct but never mapped to the IR is *not* known in
+// that sense — excluding it from RawExtra while also never encoding it makes the
+// field disappear on a same-protocol passthrough. Such fields are listed in the
+// unmapped sets below and deliberately left in RawExtra so they reach the upstream.
+var openaiChatKnownFields = knownFieldsFor(reflect.TypeOf(openaichat.ChatRequest{}), openaiChatUnmappedFields)
+var openaiResponsesKnownFields = knownFieldsFor(reflect.TypeOf(openairesponses.Request{}), openaiResponsesUnmappedFields)
+var anthropicKnownFields = knownFieldsFor(reflect.TypeOf(anthropic.Request{}), anthropicUnmappedFields)
+var geminiKnownFields = knownFieldsFor(reflect.TypeOf(gemini.Request{}), geminiUnmappedFields)
+
+// openaiChatUnmappedFields are OpenAI Chat request fields with no IR
+// representation. They round-trip via RawExtra on same-protocol passthrough and
+// are dropped cross-protocol, like any other unrepresentable option.
+var openaiChatUnmappedFields = []string{
+	"service_tier", "store", "user", "seed", "logit_bias", "logprobs",
+	"top_logprobs", "n", "frequency_penalty", "presence_penalty", "prediction",
+	"modalities", "audio", "web_search_options", "prompt_cache_key", "safety_identifier",
+}
+
+// openaiResponsesUnmappedFields are OpenAI Responses request fields with no IR
+// representation.
+var openaiResponsesUnmappedFields = []string{
+	"service_tier", "store", "user", "truncation", "include", "prompt",
+	"prompt_cache_key", "safety_identifier", "background",
+}
+
+// anthropicUnmappedFields are Anthropic request fields with no IR representation.
+var anthropicUnmappedFields = []string{
+	"metadata", "container", "mcp_servers", "service_tier",
+}
+
+// geminiUnmappedFields are Gemini request fields with no IR representation.
+var geminiUnmappedFields = []string{
+	"safetySettings", "cachedContent", "labels",
+}
+
+// knownFieldsFor derives the set of struct-declared JSON field names, minus the
+// names that are declared but never mapped to the IR.
+func knownFieldsFor(t reflect.Type, unmapped []string) map[string]bool {
+	fields := jsonFieldNames(t)
+	for _, name := range unmapped {
+		delete(fields, name)
+	}
+	return fields
+}
 
 // extractRawExtra extracts all JSON fields from body that are NOT in knownFields.
 func extractRawExtra(body []byte, knownFields map[string]bool) map[string]json.RawMessage {

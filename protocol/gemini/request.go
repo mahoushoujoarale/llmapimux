@@ -99,8 +99,24 @@ type GenerationConfig struct {
 }
 
 // ThinkingConfig controls extended thinking.
+//
+// ThinkingBudget is a pointer so that an explicit budget of 0 — which is how the
+// Gemini API is told to turn thinking off — is serialized rather than omitted.
 type ThinkingConfig struct {
-	ThinkingBudget int    `json:"thinkingBudget,omitempty"`
-	IncludeThoughts *bool `json:"includeThoughts,omitempty"`
-	ThinkingLevel  string `json:"thinkingLevel,omitempty"`
+	ThinkingBudget  *int   `json:"thinkingBudget,omitempty"`
+	IncludeThoughts *bool  `json:"includeThoughts,omitempty"`
+	ThinkingLevel   string `json:"thinkingLevel,omitempty"`
+}
+
+// SetThinkingBudget sets thinkingBudget to an explicit value, including 0.
+func (t *ThinkingConfig) SetThinkingBudget(v int) {
+	t.ThinkingBudget = &v
+}
+
+// Budget returns the thinking budget, or 0 when unset.
+func (t *ThinkingConfig) Budget() int {
+	if t == nil || t.ThinkingBudget == nil {
+		return 0
+	}
+	return *t.ThinkingBudget
 }

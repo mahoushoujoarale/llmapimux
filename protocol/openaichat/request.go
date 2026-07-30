@@ -33,12 +33,21 @@ type ChatRequest struct {
 
 // ChatMessage represents a single message in the OpenAI Chat API.
 // Content can be a string or an array of content parts.
+//
+// ReasoningSignature and ReasoningRedacted are not part of the OpenAI spec. They
+// are emitted and consumed by this gateway so that Anthropic thinking blocks
+// survive a round-trip through the Chat Completions message history — Anthropic
+// rejects a replayed thinking block whose signature is missing, and requires
+// redacted_thinking payloads to be returned verbatim. Providers ignore unknown
+// message fields, so they are harmless when the target is a real OpenAI endpoint.
 type ChatMessage struct {
-	Role             string          `json:"role"`
-	Content          json.RawMessage `json:"content,omitempty"`
-	ReasoningContent *string         `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCall      `json:"tool_calls,omitempty"`
-	ToolCallID       string          `json:"tool_call_id,omitempty"`
+	Role               string          `json:"role"`
+	Content            json.RawMessage `json:"content,omitempty"`
+	ReasoningContent   *string         `json:"reasoning_content,omitempty"`
+	ReasoningSignature *string         `json:"reasoning_signature,omitempty"`
+	ReasoningRedacted  *string         `json:"reasoning_redacted,omitempty"`
+	ToolCalls          []ToolCall      `json:"tool_calls,omitempty"`
+	ToolCallID         string          `json:"tool_call_id,omitempty"`
 }
 
 // ChatContentPart represents a single content part in an OpenAI Chat message.
@@ -101,7 +110,9 @@ type ChatResponseFormat struct {
 }
 
 // ChatResponseJSONSchema represents the json_schema sub-field of response_format.
+// Name is required by the OpenAI API when response_format.type is "json_schema".
 type ChatResponseJSONSchema struct {
 	Name   string          `json:"name,omitempty"`
 	Schema json.RawMessage `json:"schema,omitempty"`
+	Strict bool            `json:"strict,omitempty"`
 }

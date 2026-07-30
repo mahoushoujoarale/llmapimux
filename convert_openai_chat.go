@@ -26,6 +26,12 @@ func decodeOpenAIChatFinishReason(s string) StopReason {
 }
 
 // encodeOpenAIChatFinishReason maps an IR StopReason to an OpenAI Chat finish_reason string.
+//
+// The result is always one of OpenAI's documented finish_reason values. Unknown IR
+// reasons (protocol-specific values such as Anthropic's "refusal" or
+// "model_context_window_exceeded", which reach the IR verbatim) are bucketed onto
+// the closest valid value instead of being passed through, because clients and
+// SDKs parse finish_reason as a closed enum.
 func encodeOpenAIChatFinishReason(r StopReason) string {
 	switch r {
 	case StopReasonEndTurn:
@@ -40,8 +46,32 @@ func encodeOpenAIChatFinishReason(r StopReason) string {
 		return "stop"
 	case StopReasonPauseTurn:
 		return "length"
+	case "":
+		return ""
 	default:
-		return string(r)
+		return openAIFinishReasonFallback(string(r))
+	}
+}
+
+// openAIFinishReasonFallback buckets an unrecognised stop reason onto a valid
+// OpenAI finish_reason value using substring heuristics over the vocabularies used
+// by Anthropic, Gemini and OpenAI-compatible providers.
+func openAIFinishReasonFallback(raw string) string {
+	s := strings.ToLower(raw)
+	switch {
+	case strings.Contains(s, "tool") || strings.Contains(s, "function"):
+		return "tool_calls"
+	case strings.Contains(s, "refus") || strings.Contains(s, "safety") ||
+		strings.Contains(s, "filter") || strings.Contains(s, "block") ||
+		strings.Contains(s, "recitation") || strings.Contains(s, "prohibited") ||
+		strings.Contains(s, "blocklist"):
+		return "content_filter"
+	case strings.Contains(s, "length") || strings.Contains(s, "token") ||
+		strings.Contains(s, "max") || strings.Contains(s, "window") ||
+		strings.Contains(s, "truncat"):
+		return "length"
+	default:
+		return "stop"
 	}
 }
 
@@ -92,6 +122,9 @@ func encodeOpenAIChatUsage(u *Usage) *openaichat.ChatUsage {
 // DecodeOpenAIChatRequest decodes an OpenAI Chat Completions API JSON request body
 // into the unified IR Request type.
 func DecodeOpenAIChatRequest(body []byte) (*Request, error) {
+	if err := requireJSONObject(body); err != nil {
+		return nil, fmt.Errorf("decode request: %w", err)
+	}
 	var raw openaichat.ChatRequest
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("decode openai chat request: %w", err)
@@ -154,15 +187,24 @@ func DecodeOpenAIChatRequest(body []byte) (*Request, error) {
 			})
 
 		case "tool":
+			// content may be a plain string or an array of content parts; both
+			// forms are used in practice (the Responses-style SDKs emit arrays).
+			toolParts, err := decodeOpenAIChatMessageContent(m.Content)
+			if err != nil {
+				return nil, fmt.Errorf("decode openai chat request messages[%d]: %w", i, err)
+			}
+			if len(toolParts) == 0 {
+				toolParts = []ContentPart{
+					{Type: ContentTypeText, Text: &TextContent{Text: ""}},
+				}
+			}
 			parts := []ContentPart{
 				{
 					Type: ContentTypeToolResult,
 					ToolResult: &ToolResultContent{
 						ToolUseID: m.ToolCallID,
-						Content: []ContentPart{
-							{Type: ContentTypeText, Text: &TextContent{Text: decodeOpenAIChatStringContent(m.Content)}},
-						},
-						IsError: false,
+						Content:   toolParts,
+						IsError:   false,
 					},
 				},
 			}
@@ -233,6 +275,8 @@ func DecodeOpenAIChatRequest(body []byte) (*Request, error) {
 		}
 		if raw.ResponseFormat.JSONSchema != nil {
 			rf.JSONSchema = raw.ResponseFormat.JSONSchema.Schema
+			rf.Name = raw.ResponseFormat.JSONSchema.Name
+			rf.Strict = raw.ResponseFormat.JSONSchema.Strict
 		}
 		req.ResponseFormat = rf
 	}
@@ -380,11 +424,24 @@ func parseDataURI(uri string) (mediaType string, data string, err error) {
 func decodeOpenAIChatAssistantMessage(m openaichat.ChatMessage) ([]ContentPart, error) {
 	var parts []ContentPart
 
-	// Reasoning/thinking content
+	// Reasoning/thinking content. reasoning_signature / reasoning_redacted are
+	// non-standard companions emitted by this gateway so that Anthropic thinking
+	// blocks survive a trip through the Chat Completions history: Anthropic
+	// rejects a replayed thinking block whose signature is missing.
+	if m.ReasoningRedacted != nil && *m.ReasoningRedacted != "" {
+		parts = append(parts, ContentPart{
+			Type:             ContentTypeRedactedThinking,
+			RedactedThinking: &RedactedThinkingContent{Data: *m.ReasoningRedacted},
+		})
+	}
 	if m.ReasoningContent != nil && *m.ReasoningContent != "" {
+		thinking := &ThinkingContent{Thinking: *m.ReasoningContent}
+		if m.ReasoningSignature != nil {
+			thinking.Signature = *m.ReasoningSignature
+		}
 		parts = append(parts, ContentPart{
 			Type:     ContentTypeThinking,
-			Thinking: &ThinkingContent{Thinking: *m.ReasoningContent},
+			Thinking: thinking,
 		})
 	}
 
@@ -494,7 +551,7 @@ func EncodeOpenAIChatRequest(req *Request) ([]byte, error) {
 	// selector pointing at a dropped Anthropic server tool degrades to auto
 	// instead of reproducing the original 400.
 	if req.ToolChoice != nil {
-		effective := sanitizeToolChoiceForEncode(req.ToolChoice, encodedToolNames, len(raw.Tools))
+		effective := sanitizeToolChoiceForEncode(req.ToolChoice, encodedToolNames, len(raw.Tools), len(req.Tools))
 		if effective != nil {
 			tc, err := encodeOpenAIChatToolChoice(effective)
 			if err != nil {
@@ -515,8 +572,17 @@ func EncodeOpenAIChatRequest(req *Request) ([]byte, error) {
 			Type: req.ResponseFormat.Type,
 		}
 		if req.ResponseFormat.Type == "json_schema" && len(req.ResponseFormat.JSONSchema) > 0 {
+			// OpenAI requires json_schema.name; synthesise one when the inbound
+			// protocol had no equivalent field (Gemini, Anthropic) so the request
+			// is not rejected with "missing required parameter name".
+			name := req.ResponseFormat.Name
+			if name == "" {
+				name = defaultJSONSchemaName
+			}
 			rf.JSONSchema = &openaichat.ChatResponseJSONSchema{
+				Name:   name,
 				Schema: req.ResponseFormat.JSONSchema,
+				Strict: req.ResponseFormat.Strict,
 			}
 		}
 		raw.ResponseFormat = rf
@@ -556,7 +622,7 @@ func encodeOpenAIChatMessages(m Message) ([]openaichat.ChatMessage, error) {
 			}
 		}
 		if len(userParts) > 0 {
-			content := encodeOpenAIChatContentParts(userParts)
+			content := ensureNonEmptyChatContent(encodeOpenAIChatContentParts(userParts))
 			contentJSON, err := json.Marshal(content)
 			if err != nil {
 				return nil, fmt.Errorf("marshal user content: %w", err)
@@ -576,14 +642,10 @@ func encodeOpenAIChatMessages(m Message) ([]openaichat.ChatMessage, error) {
 		return []openaichat.ChatMessage{msg}, nil
 
 	case RoleTool:
-		msg, err := encodeOpenAIChatToolMessage(m)
-		if err != nil {
-			return nil, err
-		}
-		return []openaichat.ChatMessage{msg}, nil
+		return encodeOpenAIChatToolMessages(m)
 
 	default:
-		content := encodeOpenAIChatContentParts(m.Content)
+		content := ensureNonEmptyChatContent(encodeOpenAIChatContentParts(m.Content))
 		contentJSON, err := json.Marshal(content)
 		if err != nil {
 			return nil, fmt.Errorf("marshal content: %w", err)
@@ -597,6 +659,16 @@ func encodeOpenAIChatMessages(m Message) ([]openaichat.ChatMessage, error) {
 	}
 }
 
+// ensureNonEmptyChatContent guarantees at least one content part. OpenAI rejects
+// a message whose content array is empty, which would otherwise happen when every
+// part of a message had no Chat Completions representation.
+func ensureNonEmptyChatContent(parts []openaichat.ChatContentPart) []openaichat.ChatContentPart {
+	if len(parts) > 0 {
+		return parts
+	}
+	return []openaichat.ChatContentPart{{Type: "text", Text: ""}}
+}
+
 // encodeOpenAIChatToolResultPart converts a single ContentTypeToolResult part
 // to an OpenAI Chat tool message.
 func encodeOpenAIChatToolResultPart(p ContentPart) (openaichat.ChatMessage, error) {
@@ -604,7 +676,7 @@ func encodeOpenAIChatToolResultPart(p ContentPart) (openaichat.ChatMessage, erro
 		Role:       "tool",
 		ToolCallID: p.ToolResult.ToolUseID,
 	}
-	contentJSON, err := json.Marshal(toolResultText(p.ToolResult))
+	contentJSON, err := json.Marshal(toolResultTextWithError(p.ToolResult))
 	if err != nil {
 		return openaichat.ChatMessage{}, fmt.Errorf("marshal tool content: %w", err)
 	}
@@ -620,6 +692,8 @@ func encodeOpenAIChatAssistantMessage(m Message) (openaichat.ChatMessage, error)
 
 	var textParts []string
 	var reasoningParts []string
+	var reasoningSignature string
+	var reasoningRedacted string
 	var toolCalls []openaichat.ToolCall
 
 	for _, p := range m.Content {
@@ -631,6 +705,15 @@ func encodeOpenAIChatAssistantMessage(m Message) (openaichat.ChatMessage, error)
 		case ContentTypeThinking:
 			if p.Thinking != nil {
 				reasoningParts = append(reasoningParts, p.Thinking.Thinking)
+				// Keep the signature so an Anthropic target can validate the block
+				// if this history is later replayed there.
+				if p.Thinking.Signature != "" {
+					reasoningSignature = p.Thinking.Signature
+				}
+			}
+		case ContentTypeRedactedThinking:
+			if p.RedactedThinking != nil && p.RedactedThinking.Data != "" {
+				reasoningRedacted = p.RedactedThinking.Data
 			}
 		case ContentTypeRefusal:
 			// Refusal in request message history — degrade to text
@@ -640,8 +723,9 @@ func encodeOpenAIChatAssistantMessage(m Message) (openaichat.ChatMessage, error)
 		case ContentTypeToolUse:
 			if p.ToolUse != nil {
 				toolCalls = append(toolCalls, openaichat.ToolCall{
-					ID:   p.ToolUse.ID,
-					Type: "function",
+					Index: len(toolCalls),
+					ID:    p.ToolUse.ID,
+					Type:  "function",
 					Function: openaichat.ToolCallFunction{
 						Name:      p.ToolUse.Name,
 						Arguments: string(p.ToolUse.Arguments),
@@ -664,6 +748,12 @@ func encodeOpenAIChatAssistantMessage(m Message) (openaichat.ChatMessage, error)
 		reasoning := strings.Join(reasoningParts, "")
 		msg.ReasoningContent = &reasoning
 	}
+	if reasoningSignature != "" {
+		msg.ReasoningSignature = &reasoningSignature
+	}
+	if reasoningRedacted != "" {
+		msg.ReasoningRedacted = &reasoningRedacted
+	}
 
 	if len(toolCalls) > 0 {
 		msg.ToolCalls = toolCalls
@@ -672,29 +762,33 @@ func encodeOpenAIChatAssistantMessage(m Message) (openaichat.ChatMessage, error)
 	return msg, nil
 }
 
-// encodeOpenAIChatToolMessage encodes a tool role message.
-func encodeOpenAIChatToolMessage(m Message) (openaichat.ChatMessage, error) {
-	msg := openaichat.ChatMessage{
-		Role: "tool",
-	}
-
-	// Extract tool result
+// encodeOpenAIChatToolMessages encodes a tool role message. OpenAI Chat requires
+// one "tool" message per tool_call_id, so an IR message carrying several tool
+// results (Anthropic packs parallel results into a single user turn) must fan out
+// into several messages. Emitting only the first would leave the remaining
+// tool_call_ids unanswered, which providers reject.
+func encodeOpenAIChatToolMessages(m Message) ([]openaichat.ChatMessage, error) {
+	var msgs []openaichat.ChatMessage
 	for _, p := range m.Content {
-		if p.Type == ContentTypeToolResult && p.ToolResult != nil {
-			msg.ToolCallID = p.ToolResult.ToolUseID
-			contentJSON, err := json.Marshal(toolResultText(p.ToolResult))
-			if err != nil {
-				return openaichat.ChatMessage{}, fmt.Errorf("marshal tool content: %w", err)
-			}
-			msg.Content = contentJSON
-			break
+		if p.Type != ContentTypeToolResult || p.ToolResult == nil {
+			continue
 		}
+		msg, err := encodeOpenAIChatToolResultPart(p)
+		if err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, msg)
 	}
-
-	return msg, nil
+	return msgs, nil
 }
 
 // encodeOpenAIChatContentParts converts IR ContentParts to OpenAI Chat content parts.
+//
+// Content types with no Chat Completions representation (documents, thinking,
+// server tool results, ...) are replaced by a short text placeholder rather than
+// being skipped outright. Dropping them silently can yield an empty content array,
+// which providers reject with a 400, and it leaves the model unaware that content
+// was present.
 func encodeOpenAIChatContentParts(parts []ContentPart) []openaichat.ChatContentPart {
 	result := make([]openaichat.ChatContentPart, 0, len(parts))
 	for _, p := range parts {
@@ -723,9 +817,96 @@ func encodeOpenAIChatContentParts(parts []ContentPart) []openaichat.ChatContentP
 				}
 				result = append(result, cp)
 			}
+		case ContentTypeDocument:
+			// OpenAI Chat Completions has no document/file content part.
+			if text := documentPlaceholderText(p.Document); text != "" {
+				result = append(result, openaichat.ChatContentPart{Type: "text", Text: text})
+			}
+		case ContentTypeThinking:
+			// Thinking is carried on the message-level reasoning_content field,
+			// not as a content part; handled by the caller.
+		default:
+			if text := unrepresentablePlaceholderText(p); text != "" {
+				result = append(result, openaichat.ChatContentPart{Type: "text", Text: text})
+			}
 		}
 	}
 	return result
+}
+
+// documentPlaceholderText renders a document part as text for protocols with no
+// document content type.
+func documentPlaceholderText(doc *DocumentContent) string {
+	if doc == nil {
+		return "[document omitted]"
+	}
+	switch {
+	case doc.URL != "":
+		if doc.Title != "" {
+			return fmt.Sprintf("[document: %s (%s)]", doc.Title, doc.URL)
+		}
+		return fmt.Sprintf("[document: %s]", doc.URL)
+	case doc.Title != "":
+		return fmt.Sprintf("[document: %s (content omitted: not supported by this provider)]", doc.Title)
+	default:
+		return "[document omitted: not supported by this provider]"
+	}
+}
+
+// unrepresentablePlaceholderText renders content parts that have no equivalent in
+// the target protocol as a short text note, so the message never encodes to an
+// empty content array and the model is told something was dropped.
+func unrepresentablePlaceholderText(p ContentPart) string {
+	switch p.Type {
+	case ContentTypeRefusal:
+		if p.Refusal != nil {
+			return p.Refusal.Refusal
+		}
+		return ""
+	case ContentTypeRedactedThinking:
+		// Deliberately not rendered: the payload is opaque ciphertext and is
+		// preserved separately for same-protocol round-trips.
+		return ""
+	case ContentTypeServerToolUse:
+		if p.ServerToolUse != nil && p.ServerToolUse.Name != "" {
+			return fmt.Sprintf("[server tool call: %s]", p.ServerToolUse.Name)
+		}
+		return "[server tool call]"
+	case ContentTypeWebSearchToolResult:
+		return webSearchResultPlaceholderText(p.WebSearchToolResult)
+	default:
+		return ""
+	}
+}
+
+// webSearchResultPlaceholderText renders built-in web search results as text for
+// protocols that cannot express them structurally, so the citations the model
+// relied on are not lost entirely.
+func webSearchResultPlaceholderText(r *WebSearchToolResultContent) string {
+	if r == nil {
+		return ""
+	}
+	if r.IsError {
+		if r.ErrorCode != "" {
+			return fmt.Sprintf("[web search failed: %s]", r.ErrorCode)
+		}
+		return "[web search failed]"
+	}
+	if len(r.Content) == 0 {
+		return "[web search returned no results]"
+	}
+	var b strings.Builder
+	b.WriteString("[web search results:")
+	for _, hit := range r.Content {
+		b.WriteString("\n- ")
+		if hit.Title != "" {
+			b.WriteString(hit.Title)
+			b.WriteString(": ")
+		}
+		b.WriteString(hit.URL)
+	}
+	b.WriteString("]")
+	return b.String()
 }
 
 // encodeOpenAIChatToolChoice converts an IR ToolChoice to the OpenAI tool_choice JSON.
@@ -809,8 +990,8 @@ func DecodeOpenAIChatResponse(body []byte) (*Response, error) {
 			// Refusal content
 			if choice.Message.Refusal != nil && *choice.Message.Refusal != "" {
 				resp.Content = append(resp.Content, ContentPart{
-					Type:      ContentTypeRefusal,
-					Refusal:   &RefusalContent{Refusal: *choice.Message.Refusal},
+					Type:       ContentTypeRefusal,
+					Refusal:    &RefusalContent{Refusal: *choice.Message.Refusal},
 					SourceType: ContentTypeRefusal,
 				})
 			}
@@ -881,8 +1062,9 @@ func EncodeOpenAIChatResponse(resp *Response) ([]byte, error) {
 		case ContentTypeToolUse:
 			if p.ToolUse != nil {
 				toolCalls = append(toolCalls, openaichat.ToolCall{
-					ID:   p.ToolUse.ID,
-					Type: "function",
+					Index: len(toolCalls),
+					ID:    p.ToolUse.ID,
+					Type:  "function",
 					Function: openaichat.ToolCallFunction{
 						Name:      p.ToolUse.Name,
 						Arguments: string(p.ToolUse.Arguments),
@@ -931,124 +1113,168 @@ func EncodeOpenAIChatResponse(resp *Response) ([]byte, error) {
 // --- Streaming decode/encode ---
 
 // DecodeOpenAIChatStreamChunk decodes an OpenAI Chat streaming chunk JSON (the data
-// from an SSE "data:" line) into the unified IR StreamEvent.
+// from an SSE "data:" line) into a single unified IR StreamEvent.
+//
+// Deprecated: a single OpenAI Chat chunk can legitimately carry several IR events
+// (e.g. content plus finish_reason, or several parallel tool_calls). Prefer
+// DecodeOpenAIChatStreamChunks, which returns all of them. This wrapper returns
+// only the first event and is kept for backwards compatibility.
 func DecodeOpenAIChatStreamChunk(data []byte) (*StreamEvent, error) {
+	events, err := DecodeOpenAIChatStreamChunks(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(events) == 0 {
+		return nil, nil
+	}
+	return events[0], nil
+}
+
+// DecodeOpenAIChatStreamChunks decodes an OpenAI Chat streaming chunk JSON (the data
+// from an SSE "data:" line) into zero or more unified IR StreamEvents.
+//
+// A single chunk may fan out into several IR events:
+//   - Providers such as vLLM, DeepSeek and Azure emit content and finish_reason in
+//     the same chunk; both the content delta and the stop event must be produced or
+//     the final token is lost.
+//   - Parallel tool calls may be batched into one delta.tool_calls array; each entry
+//     becomes its own IR delta keyed by its own index.
+func DecodeOpenAIChatStreamChunks(data []byte) ([]*StreamEvent, error) {
 	var raw openaichat.ChatStreamChunk
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("decode openai chat stream chunk: %w", err)
 	}
 
-	// No choices — could be a usage-only chunk
-	if len(raw.Choices) == 0 {
-		if raw.Usage != nil {
-			u := decodeOpenAIChatUsage(raw.Usage)
-			return &StreamEvent{
-				Type:  StreamEventDelta,
-				Usage: &u,
-			}, nil
-		}
-		// Start event with just ID/Model
+	startEvent := func() *StreamEvent {
 		return &StreamEvent{
 			Type: StreamEventStart,
 			Response: &Response{
 				ID:    raw.ID,
 				Model: raw.Model,
 			},
-		}, nil
+		}
+	}
+
+	// No choices — could be a usage-only chunk.
+	if len(raw.Choices) == 0 {
+		if raw.Usage != nil {
+			u := decodeOpenAIChatUsage(raw.Usage)
+			return []*StreamEvent{{
+				Type:  StreamEventDelta,
+				Usage: &u,
+			}}, nil
+		}
+		return []*StreamEvent{startEvent()}, nil
 	}
 
 	choice := raw.Choices[0]
 	delta := choice.Delta
+	// Multi-choice (n>1) streaming: keep the choice index so downstream encoders
+	// can keep the candidates in distinct content blocks instead of interleaving
+	// them into one.
+	baseIndex := choice.Index
 
-	// Check for finish_reason
+	// First chunk with role only.
+	if delta != nil && delta.Role != "" && delta.Content == nil && delta.ReasoningContent == nil &&
+		delta.Refusal == nil && len(delta.ToolCalls) == 0 &&
+		(choice.FinishReason == nil || *choice.FinishReason == "") {
+		return []*StreamEvent{startEvent()}, nil
+	}
+
+	var events []*StreamEvent
+
+	if delta != nil {
+		// Reasoning/thinking content delta (emitted first, matching natural order).
+		if delta.ReasoningContent != nil {
+			events = append(events, &StreamEvent{
+				Type:  StreamEventDelta,
+				Index: baseIndex,
+				Delta: &ContentPart{
+					Type:     ContentTypeThinking,
+					Thinking: &ThinkingContent{Thinking: *delta.ReasoningContent},
+				},
+			})
+		}
+
+		// Content delta.
+		if delta.Content != nil {
+			events = append(events, &StreamEvent{
+				Type:  StreamEventDelta,
+				Index: baseIndex,
+				Delta: &ContentPart{
+					Type: ContentTypeText,
+					Text: &TextContent{Text: *delta.Content},
+				},
+			})
+		}
+
+		// Refusal delta.
+		if delta.Refusal != nil {
+			events = append(events, &StreamEvent{
+				Type:  StreamEventDelta,
+				Index: baseIndex,
+				Delta: &ContentPart{
+					Type:       ContentTypeRefusal,
+					Refusal:    &RefusalContent{Refusal: *delta.Refusal},
+					SourceType: ContentTypeRefusal,
+				},
+			})
+		}
+
+		// Tool call deltas — every entry in the array, not just the first.
+		for _, tc := range delta.ToolCalls {
+			events = append(events, &StreamEvent{
+				Type:  StreamEventDelta,
+				Index: tc.Index,
+				Delta: &ContentPart{
+					Type: ContentTypeToolUse,
+					ToolUse: &ToolUseContent{
+						ID:        tc.ID,
+						Name:      tc.Function.Name,
+						Arguments: json.RawMessage(tc.Function.Arguments),
+					},
+				},
+			})
+		}
+	}
+
+	// finish_reason — emitted after any content in the same chunk so the final
+	// token is not dropped.
 	if choice.FinishReason != nil && *choice.FinishReason != "" {
 		stopReason := decodeOpenAIChatFinishReason(*choice.FinishReason)
-		event := &StreamEvent{
+		stop := &StreamEvent{
 			Type:       StreamEventStop,
 			StopReason: &stopReason,
 		}
 		if raw.Usage != nil {
 			u := decodeOpenAIChatUsage(raw.Usage)
-			event.Usage = &u
+			stop.Usage = &u
 		}
-		return event, nil
+		events = append(events, stop)
+		return events, nil
 	}
 
-	// First chunk with role
-	if delta != nil && delta.Role != "" && delta.Content == nil && delta.ReasoningContent == nil && delta.Refusal == nil && len(delta.ToolCalls) == 0 {
-		return &StreamEvent{
-			Type: StreamEventStart,
-			Response: &Response{
-				ID:    raw.ID,
-				Model: raw.Model,
-			},
-		}, nil
+	// A usage payload alongside a content delta (some providers do this) must not
+	// be dropped — attach it to the last emitted event.
+	if raw.Usage != nil && len(events) > 0 {
+		u := decodeOpenAIChatUsage(raw.Usage)
+		events[len(events)-1].Usage = &u
 	}
 
-	// Refusal delta
-	if delta != nil && delta.Refusal != nil {
-		return &StreamEvent{
-			Type: StreamEventDelta,
-			Delta: &ContentPart{
-				Type:      ContentTypeRefusal,
-				Refusal:   &RefusalContent{Refusal: *delta.Refusal},
-				SourceType: ContentTypeRefusal,
-			},
-		}, nil
+	if len(events) == 0 {
+		return []*StreamEvent{startEvent()}, nil
 	}
-
-	// Reasoning/thinking content delta
-	if delta != nil && delta.ReasoningContent != nil {
-		return &StreamEvent{
-			Type: StreamEventDelta,
-			Delta: &ContentPart{
-				Type:     ContentTypeThinking,
-				Thinking: &ThinkingContent{Thinking: *delta.ReasoningContent},
-			},
-		}, nil
-	}
-
-	// Content delta
-	if delta != nil && delta.Content != nil {
-		return &StreamEvent{
-			Type: StreamEventDelta,
-			Delta: &ContentPart{
-				Type: ContentTypeText,
-				Text: &TextContent{Text: *delta.Content},
-			},
-		}, nil
-	}
-
-	// Tool calls delta
-	if delta != nil && len(delta.ToolCalls) > 0 {
-		tc := delta.ToolCalls[0]
-		return &StreamEvent{
-			Type:  StreamEventDelta,
-			Index: tc.Index,
-			Delta: &ContentPart{
-				Type: ContentTypeToolUse,
-				ToolUse: &ToolUseContent{
-					ID:        tc.ID,
-					Name:      tc.Function.Name,
-					Arguments: json.RawMessage(tc.Function.Arguments),
-				},
-			},
-		}, nil
-	}
-
-	// Default: start event
-	return &StreamEvent{
-		Type: StreamEventStart,
-		Response: &Response{
-			ID:    raw.ID,
-			Model: raw.Model,
-		},
-	}, nil
+	return events, nil
 }
 
 // EncodeOpenAIChatStreamChunk encodes a unified IR StreamEvent into an OpenAI Chat
 // streaming chunk JSON (suitable for an SSE "data:" line).
 func EncodeOpenAIChatStreamChunk(event *StreamEvent) ([]byte, error) {
+	// A nil event is a "nothing to emit" signal from an upstream decoder that saw a
+	// chunk it does not map. Treat it as a skip rather than dereferencing it.
+	if event == nil {
+		return nil, nil
+	}
 	raw := openaichat.ChatStreamChunk{
 		Object: "chat.completion.chunk",
 	}
@@ -1159,8 +1385,35 @@ func EncodeOpenAIChatStreamChunk(event *StreamEvent) ([]byte, error) {
 			raw.Usage = encodeOpenAIChatUsage(event.Usage)
 		}
 
-	case StreamEventContentBlockStart, StreamEventContentBlockStop:
-		// These lifecycle events have no equivalent in OpenAI Chat streaming; skip silently.
+	case StreamEventContentBlockStart:
+		// Most block-start events carry no payload OpenAI Chat can express. A
+		// tool_use block start is the exception and must not be skipped: for
+		// Anthropic-style sources the tool's id and name arrive *only* here, with
+		// the deltas carrying nothing but incremental argument JSON. Dropping it
+		// leaves the client with an unnamed tool call.
+		if event.Delta != nil && event.Delta.Type == ContentTypeToolUse && event.Delta.ToolUse != nil {
+			raw.Choices = []openaichat.ChatChoice{
+				{
+					Index: 0,
+					Delta: &openaichat.ChatChoiceMessage{
+						ToolCalls: []openaichat.ToolCall{{
+							Index: event.Index,
+							ID:    event.Delta.ToolUse.ID,
+							Type:  "function",
+							Function: openaichat.ToolCallFunction{
+								Name:      event.Delta.ToolUse.Name,
+								Arguments: string(event.Delta.ToolUse.Arguments),
+							},
+						}},
+					},
+				},
+			}
+			break
+		}
+		return nil, nil
+
+	case StreamEventContentBlockStop:
+		// No equivalent in OpenAI Chat streaming; skip silently.
 		return nil, nil
 
 	case StreamEventError:

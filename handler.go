@@ -2,6 +2,7 @@ package llmapimux
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -344,6 +345,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.reqMod(r.Context(), req, loop.target)
 			}
 
+			// Same-protocol passthrough: fold the inbound request's unknown fields
+			// back into the outbound body so protocol-specific options the IR
+			// cannot represent (service_tier, safetySettings, cachedContent, ...)
+			// reach the upstream. Caller-supplied OutboundExtra wins on conflict.
+			// Cross-protocol attempts leave RawExtra nil and are unaffected.
+			if len(req.RawExtra) > 0 && req.InboundProtocol == loop.target.Protocol {
+				known := h.codec.KnownFields()
+				merged := make(map[string]json.RawMessage, len(req.RawExtra)+len(req.OutboundExtra))
+				for k, v := range req.RawExtra {
+					if !known[k] {
+						merged[k] = v
+					}
+				}
+				for k, v := range req.OutboundExtra {
+					merged[k] = v
+				}
+				req.OutboundExtra = merged
+			}
+
 			admission, err := loop.acquireAttempt(retryAttempt)
 			if err != nil {
 				releaseAttempt(admission)
@@ -453,10 +473,6 @@ func (s *retryLoopState) handleNonStreaming(resp *Response, firstByteTime time.T
 	if err != nil {
 		s.h.codec.WriteError(s.w, 502, "failed to encode response: "+err.Error())
 		return
-	}
-	// Merge RawExtra only for same-protocol roundtrip
-	if s.req.InboundProtocol == s.target.Protocol {
-		data, _ = mergeRawExtra(data, s.req.RawExtra, s.h.codec.KnownFields())
 	}
 	s.w.Header().Set("Content-Type", "application/json")
 	s.w.WriteHeader(http.StatusOK)

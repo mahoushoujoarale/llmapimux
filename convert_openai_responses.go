@@ -55,6 +55,9 @@ func derefIntPtr(p *int) int {
 // DecodeOpenAIResponsesRequest decodes an OpenAI Responses API JSON request body
 // into the unified IR Request type.
 func DecodeOpenAIResponsesRequest(body []byte) (*Request, error) {
+	if err := requireJSONObject(body); err != nil {
+		return nil, fmt.Errorf("decode request: %w", err)
+	}
 	var raw openairesponses.Request
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("decode openai responses request: %w", err)
@@ -158,7 +161,9 @@ func DecodeOpenAIResponsesRequest(body []byte) (*Request, error) {
 	// text.format → ResponseFormat
 	if raw.Text != nil && raw.Text.Format != nil {
 		rf := &ResponseFormat{
-			Type: raw.Text.Format.Type,
+			Type:   raw.Text.Format.Type,
+			Name:   raw.Text.Format.Name,
+			Strict: raw.Text.Format.Strict,
 		}
 		if raw.Text.Format.Type == "json_schema" && len(raw.Text.Format.Schema) > 0 {
 			rf.JSONSchema = raw.Text.Format.Schema
@@ -377,6 +382,38 @@ func decodeOaiRespInput(raw json.RawMessage) ([]Message, []ContentPart, error) {
 				},
 			})
 
+		case "reasoning":
+			// Reverse of the encode path: rebuild the IR thinking / redacted
+			// thinking parts so an Anthropic target receives replayable blocks.
+			var parts []ContentPart
+			if item.EncryptedContent != "" {
+				parts = append(parts, ContentPart{
+					Type:             ContentTypeRedactedThinking,
+					RedactedThinking: &RedactedThinkingContent{Data: item.EncryptedContent},
+				})
+			}
+			var summaryTexts []string
+			for _, s := range item.Summary {
+				if s.Text != "" {
+					summaryTexts = append(summaryTexts, s.Text)
+				}
+			}
+			if len(summaryTexts) > 0 || item.Signature != "" {
+				parts = append(parts, ContentPart{
+					Type: ContentTypeThinking,
+					Thinking: &ThinkingContent{
+						Thinking:  strings.Join(summaryTexts, "\n"),
+						Signature: item.Signature,
+					},
+				})
+			}
+			if len(parts) > 0 {
+				messages = append(messages, Message{
+					Role:    RoleAssistant,
+					Content: parts,
+				})
+			}
+
 		default:
 			// Unknown item type — skip silently
 		}
@@ -424,7 +461,25 @@ func decodeOaiRespMessageContent(raw json.RawMessage) ([]ContentPart, error) {
 		case "input_image":
 			img := &ImageContent{}
 			if p.ImageURL != "" {
-				img.URL = p.ImageURL
+				// A base64 data URI must be decoded into raw bytes so that
+				// cross-protocol encoders can rebuild it in the target's native
+				// form. Leaving it as a URL makes Anthropic/Gemini receive
+				// source.type=url pointing at a "data:" string, which they reject.
+				if strings.HasPrefix(p.ImageURL, "data:") {
+					mediaType, b64Data, err := parseDataURI(p.ImageURL)
+					if err == nil {
+						if data, decErr := base64.StdEncoding.DecodeString(b64Data); decErr == nil {
+							img.Data = data
+							img.MediaType = mediaType
+						}
+					}
+				}
+				if len(img.Data) == 0 {
+					img.URL = p.ImageURL
+				}
+			}
+			if p.Detail != "" {
+				img.Detail = p.Detail
 			}
 			result = append(result, ContentPart{
 				Type:  ContentTypeImage,
@@ -562,7 +617,7 @@ func EncodeOpenAIResponsesRequest(req *Request) ([]byte, error) {
 	// sanitizer degrades or drops the choice so the outbound request stays
 	// valid for strict providers.
 	if req.ToolChoice != nil {
-		effective := sanitizeToolChoiceForEncode(req.ToolChoice, encodedToolNames, len(raw.Tools))
+		effective := sanitizeToolChoiceForEncode(req.ToolChoice, encodedToolNames, len(raw.Tools), len(req.Tools))
 		if effective != nil {
 			tc, err := encodeOaiRespToolChoice(&Request{Tools: survivingTools, ToolChoice: effective})
 			if err != nil {
@@ -588,14 +643,20 @@ func EncodeOpenAIResponsesRequest(req *Request) ([]byte, error) {
 
 	// ResponseFormat → text.format
 	if req.ResponseFormat != nil {
-		raw.Text = &openairesponses.Text{
-			Format: &openairesponses.TextFormat{
-				Type: req.ResponseFormat.Type,
-			},
+		format := &openairesponses.TextFormat{
+			Type: req.ResponseFormat.Type,
 		}
 		if req.ResponseFormat.Type == "json_schema" && len(req.ResponseFormat.JSONSchema) > 0 {
-			raw.Text.Format.Schema = req.ResponseFormat.JSONSchema
+			format.Schema = req.ResponseFormat.JSONSchema
+			// The Responses API requires text.format.name for json_schema; fall
+			// back to a synthetic name for inbound protocols that have none.
+			format.Name = req.ResponseFormat.Name
+			if format.Name == "" {
+				format.Name = defaultJSONSchemaName
+			}
+			format.Strict = req.ResponseFormat.Strict
 		}
+		raw.Text = &openairesponses.Text{Format: format}
 	}
 
 	return json.Marshal(raw)
@@ -614,7 +675,7 @@ func encodeOaiRespMessage(m Message) []openairesponses.InputItem {
 				items = append(items, openairesponses.InputItem{
 					Type:   "function_call_output",
 					CallID: p.ToolResult.ToolUseID,
-					Output: toolResultText(p.ToolResult),
+					Output: toolResultTextWithError(p.ToolResult),
 				})
 			} else {
 				msgParts = append(msgParts, p)
@@ -635,6 +696,7 @@ func encodeOaiRespMessage(m Message) []openairesponses.InputItem {
 		// Split into message content and function_call items
 		var textParts []openairesponses.ContentPart
 		var funcCalls []openairesponses.InputItem
+		var reasoningItems []openairesponses.InputItem
 		for _, p := range m.Content {
 			switch p.Type {
 			case ContentTypeText:
@@ -642,6 +704,31 @@ func encodeOaiRespMessage(m Message) []openairesponses.InputItem {
 					textParts = append(textParts, openairesponses.ContentPart{
 						Type: "output_text",
 						Text: p.Text.Text,
+					})
+				}
+			case ContentTypeRedactedThinking:
+				// Anthropic requires redacted_thinking blocks to be replayed
+				// verbatim when thinking is enabled, so they must survive a trip
+				// through the Responses input history. The Responses API models
+				// opaque reasoning as a reasoning item with encrypted_content.
+				if p.RedactedThinking != nil && p.RedactedThinking.Data != "" {
+					reasoningItems = append(reasoningItems, openairesponses.InputItem{
+						Type:             "reasoning",
+						EncryptedContent: p.RedactedThinking.Data,
+					})
+				}
+			case ContentTypeThinking:
+				// Preserve the signature so an Anthropic target can validate the
+				// replayed thinking block; plain summary text alone would be
+				// rejected. Only emitted when a signature is present, since
+				// unsigned thinking has no replay value.
+				if p.Thinking != nil && p.Thinking.Signature != "" {
+					reasoningItems = append(reasoningItems, openairesponses.InputItem{
+						Type:      "reasoning",
+						Signature: p.Thinking.Signature,
+						Summary: []openairesponses.ReasoningSummary{
+							{Type: "summary_text", Text: p.Thinking.Thinking},
+						},
 					})
 				}
 			case ContentTypeToolUse:
@@ -656,6 +743,8 @@ func encodeOaiRespMessage(m Message) []openairesponses.InputItem {
 			}
 		}
 		var items []openairesponses.InputItem
+		// Reasoning precedes the message, matching OpenAI's output ordering.
+		items = append(items, reasoningItems...)
 		if len(textParts) > 0 {
 			data, _ := json.Marshal(textParts)
 			items = append(items, openairesponses.InputItem{
@@ -675,7 +764,7 @@ func encodeOaiRespMessage(m Message) []openairesponses.InputItem {
 				items = append(items, openairesponses.InputItem{
 					Type:   "function_call_output",
 					CallID: p.ToolResult.ToolUseID,
-					Output: toolResultText(p.ToolResult),
+					Output: toolResultTextWithError(p.ToolResult),
 				})
 			}
 		}
@@ -708,7 +797,7 @@ func encodeOaiRespContentParts(parts []ContentPart, textType string) []openaires
 			}
 		case ContentTypeImage:
 			if p.Image != nil {
-				cp := openairesponses.ContentPart{Type: "input_image"}
+				cp := openairesponses.ContentPart{Type: "input_image", Detail: p.Image.Detail}
 				if p.Image.URL != "" {
 					cp.ImageURL = p.Image.URL
 				} else if len(p.Image.Data) > 0 {
@@ -987,7 +1076,7 @@ func DecodeOpenAIResponsesResponse(body []byte) (*Response, error) {
 			} else if item.EncryptedContent != "" {
 				// Encrypted reasoning without summary text → redacted thinking
 				resp.Content = append(resp.Content, ContentPart{
-					Type:            ContentTypeRedactedThinking,
+					Type:             ContentTypeRedactedThinking,
 					RedactedThinking: &RedactedThinkingContent{Data: item.EncryptedContent},
 				})
 			}
@@ -1009,8 +1098,8 @@ func DecodeOpenAIResponsesResponse(body []byte) (*Response, error) {
 					resp.Content = append(resp.Content, textPart)
 				case "refusal":
 					resp.Content = append(resp.Content, ContentPart{
-						Type:      ContentTypeRefusal,
-						Refusal:   &RefusalContent{Refusal: c.Refusal},
+						Type:       ContentTypeRefusal,
+						Refusal:    &RefusalContent{Refusal: c.Refusal},
 						SourceType: ContentTypeRefusal,
 					})
 				}
@@ -1055,6 +1144,15 @@ func DecodeOpenAIResponsesResponse(body []byte) (*Response, error) {
 	return resp, nil
 }
 
+// isOpenAIResponsesStatus reports whether s is a documented Responses API status.
+func isOpenAIResponsesStatus(s string) bool {
+	switch s {
+	case "completed", "incomplete", "failed", "in_progress", "cancelled", "queued":
+		return true
+	}
+	return false
+}
+
 // EncodeOpenAIResponsesResponse encodes a unified IR Response into an OpenAI Responses API JSON body.
 func EncodeOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 	raw := openairesponses.Response{
@@ -1067,7 +1165,6 @@ func EncodeOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 	var reasoningItems []openairesponses.OutputItem
 	var msgContent []openairesponses.OutputContent
 	var funcCalls []openairesponses.OutputItem
-	hasFunctionCall := false
 
 	for _, p := range resp.Content {
 		switch p.Type {
@@ -1109,7 +1206,6 @@ func EncodeOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 				})
 			}
 		case ContentTypeToolUse:
-			hasFunctionCall = true
 			if p.ToolUse != nil {
 				funcCalls = append(funcCalls, openairesponses.OutputItem{
 					Type:      "function_call",
@@ -1132,7 +1228,9 @@ func EncodeOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 	}
 	raw.Output = append(raw.Output, funcCalls...)
 
-	// StopReason → status
+	// StopReason → status. The Responses API status is a closed enum
+	// (completed / incomplete / failed / in_progress / cancelled), so an
+	// unrecognised IR reason is bucketed rather than forwarded verbatim.
 	switch resp.StopReason {
 	case StopReasonEndTurn, StopReasonStopSequence:
 		raw.Status = "completed"
@@ -1144,12 +1242,19 @@ func EncodeOpenAIResponsesResponse(resp *Response) ([]byte, error) {
 		raw.Status = "failed"
 	case StopReasonPauseTurn:
 		raw.Status = "incomplete"
+	case "":
+		raw.Status = "completed"
 	default:
-		if resp.StopReason != "" {
+		if isOpenAIResponsesStatus(string(resp.StopReason)) {
 			raw.Status = string(resp.StopReason)
-		} else if hasFunctionCall {
-			raw.Status = "completed"
-		} else {
+			break
+		}
+		switch openAIFinishReasonFallback(string(resp.StopReason)) {
+		case "length":
+			raw.Status = "incomplete"
+		case "content_filter":
+			raw.Status = "failed"
+		default:
 			raw.Status = "completed"
 		}
 	}
@@ -1212,6 +1317,11 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) ([]*StreamE
 						Name: raw.Item.Name,
 					},
 				}
+			case "reasoning":
+				event.Delta = &ContentPart{
+					Type:     ContentTypeThinking,
+					Thinking: &ThinkingContent{},
+				}
 			case "web_search_call":
 				// Defer emission until response.output_item.done, when the
 				// action payload (query, sources) is available. Emitting a
@@ -1240,6 +1350,20 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) ([]*StreamE
 			},
 		}}, nil
 
+	case "response.reasoning_summary_text.delta":
+		// codeflicker-fix: LOGIC-Issue-003/tb3m3jp0fdxv42afyew5
+		var raw openairesponses.StreamEvent
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return nil, fmt.Errorf("decode openai responses stream reasoning_summary_text.delta: %w", err)
+		}
+		return []*StreamEvent{{
+			Type:  StreamEventDelta,
+			Index: derefIntPtr(raw.OutputIndex),
+			Delta: &ContentPart{
+				Type:     ContentTypeThinking,
+				Thinking: &ThinkingContent{Thinking: raw.Delta},
+			},
+		}}, nil
 	case "response.function_call_arguments.delta":
 		var raw openairesponses.StreamEvent
 		if err := json.Unmarshal(data, &raw); err != nil {
@@ -1397,6 +1521,11 @@ func DecodeOpenAIResponsesStreamEvent(eventType string, data []byte) ([]*StreamE
 // EncodeOpenAIResponsesStreamEvent encodes a unified IR StreamEvent into an OpenAI
 // Responses API SSE event type and JSON data.
 func EncodeOpenAIResponsesStreamEvent(event *StreamEvent) (string, []byte, error) {
+	// A nil event is a "nothing to emit" signal from an upstream decoder that saw a
+	// chunk it does not map. Treat it as a skip rather than dereferencing it.
+	if event == nil {
+		return "", nil, nil
+	}
 	switch event.Type {
 	case StreamEventStart:
 		raw := openairesponses.StreamEvent{Type: "response.created"}

@@ -363,8 +363,8 @@ func TestOpenAIResponsesClient_SendStream_LifecycleSequence(t *testing.T) {
 
 func TestOpenAIResponsesClient_SendStream_ReasoningModelIndexRemap(t *testing.T) {
 	// Simulates a reasoning model (e.g. o-series) that produces:
-	// - A reasoning item at output_index=0 (should be suppressed)
-	// - A message item at output_index=1 (should be remapped to index=0)
+	// - A reasoning item at output_index=0 (must be preserved)
+	// - A message item at output_index=1 (must retain its distinct index)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
@@ -372,13 +372,13 @@ func TestOpenAIResponsesClient_SendStream_ReasoningModelIndexRemap(t *testing.T)
 		fmt.Fprintf(w, "event: response.created\ndata: {\"response\":{\"id\":\"resp_1\",\"model\":\"o4-mini\",\"status\":\"in_progress\"}}\n\n")
 		flusher.Flush()
 
-		// Reasoning item (type="reasoning") — should be suppressed entirely
+		// Reasoning item (type="reasoning") — must remain visible in the IR.
 		fmt.Fprintf(w, "event: response.output_item.added\ndata: {\"output_index\":0,\"item\":{\"type\":\"reasoning\"}}\n\n")
 		flusher.Flush()
 		fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"output_index\":0}\n\n")
 		flusher.Flush()
 
-		// Message item at index=1 — should be remapped to index=0
+		// Message item remains a separate block at index=1.
 		fmt.Fprintf(w, "event: response.output_item.added\ndata: {\"output_index\":1,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n")
 		flusher.Flush()
 		fmt.Fprintf(w, "event: response.output_text.delta\ndata: {\"output_index\":1,\"delta\":\"Hello\"}\n\n")
@@ -407,16 +407,19 @@ func TestOpenAIResponsesClient_SendStream_ReasoningModelIndexRemap(t *testing.T)
 		events = append(events, result.Event)
 	}
 
-	// Expect: Start, ContentBlockStart(0), Delta(0), ContentBlockStop(0), Stop
-	if len(events) != 5 {
+	// codeflicker-fix: LOGIC-Issue-003/tb3m3jp0fdxv42afyew5
+	// Expect: Start, reasoning block, text block, Stop.
+	if len(events) != 7 {
 		types := make([]StreamEventType, len(events))
 		for i, e := range events {
 			types[i] = e.Type
 		}
-		t.Fatalf("events len = %d, want 5; types = %v", len(events), types)
+		t.Fatalf("events len = %d, want 7; types = %v", len(events), types)
 	}
 	want := []StreamEventType{
 		StreamEventStart,
+		StreamEventContentBlockStart,
+		StreamEventContentBlockStop,
 		StreamEventContentBlockStart,
 		StreamEventDelta,
 		StreamEventContentBlockStop,
@@ -427,15 +430,14 @@ func TestOpenAIResponsesClient_SendStream_ReasoningModelIndexRemap(t *testing.T)
 			t.Errorf("events[%d].Type = %q, want %q", i, events[i].Type, wantType)
 		}
 	}
-	// All indexed events should have been remapped to index 0
-	if events[1].Index != 0 {
-		t.Errorf("ContentBlockStart.Index = %d, want 0 (remapped from 1)", events[1].Index)
+	if events[1].Delta == nil || events[1].Delta.Type != ContentTypeThinking {
+		t.Errorf("reasoning block = %+v, want thinking", events[1].Delta)
 	}
-	if events[2].Index != 0 {
-		t.Errorf("Delta.Index = %d, want 0 (remapped from 1)", events[2].Index)
+	if events[1].Index != 0 || events[2].Index != 0 {
+		t.Errorf("reasoning indexes = %d,%d, want 0,0", events[1].Index, events[2].Index)
 	}
-	if events[3].Index != 0 {
-		t.Errorf("ContentBlockStop.Index = %d, want 0 (remapped from 1)", events[3].Index)
+	if events[3].Index != 1 || events[4].Index != 1 || events[5].Index != 1 {
+		t.Errorf("text indexes = %d,%d,%d, want 1,1,1", events[3].Index, events[4].Index, events[5].Index)
 	}
 }
 

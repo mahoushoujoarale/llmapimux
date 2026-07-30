@@ -1,6 +1,21 @@
 package llmapimux
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+)
+
+// requireJSONObject rejects syntactically valid JSON values that cannot represent
+// an API request. encoding/json otherwise accepts null into a struct as a zero
+// value, which could forward an unintended empty request upstream.
+func requireJSONObject(body []byte) error {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || !json.Valid(trimmed) || trimmed[0] != '{' {
+		return fmt.Errorf("request body must be a JSON object")
+	}
+	return nil
+}
 
 // Role represents the role of a message sender.
 type Role string
@@ -193,8 +208,13 @@ type ThinkingConfig struct {
 
 // ResponseFormat controls the output format of the model.
 type ResponseFormat struct {
-	Type       string          `json:"type"`
+	Type string `json:"type"`
+	// Name is the schema name. OpenAI requires response_format.json_schema.name
+	// to be present, so it must survive a round-trip; other protocols ignore it.
+	Name       string          `json:"name,omitempty"`
 	JSONSchema json.RawMessage `json:"json_schema,omitempty"`
+	// Strict enables strict schema adherence (OpenAI json_schema.strict).
+	Strict bool `json:"strict,omitempty"`
 }
 
 // Request is the unified intermediate representation of an LLM API request.
@@ -242,18 +262,18 @@ type Response struct {
 // each protocol's converter maps to/from its own wire field names.
 type Usage struct {
 	// === Input side ===
-	PromptTokens          int `json:"prompt_tokens,omitempty"`            // Total input tokens (includes cache hit)
-	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`  // Cache hit tokens (Anthropic: cache_read_input_tokens, OpenAI: cached_tokens, Gemini: cachedContentTokenCount)
+	PromptTokens           int `json:"prompt_tokens,omitempty"`             // Total input tokens (includes cache hit)
+	PromptCacheHitTokens   int `json:"prompt_cache_hit_tokens,omitempty"`   // Cache hit tokens (Anthropic: cache_read_input_tokens, OpenAI: cached_tokens, Gemini: cachedContentTokenCount)
 	PromptCacheWriteTokens int `json:"prompt_cache_write_tokens,omitempty"` // Cache write tokens (Anthropic: cache_creation_input_tokens)
-	PromptAudioTokens     int `json:"prompt_audio_tokens,omitempty"`       // Input audio tokens (OpenAI: prompt_details.audio_tokens)
+	PromptAudioTokens      int `json:"prompt_audio_tokens,omitempty"`       // Input audio tokens (OpenAI: prompt_details.audio_tokens)
 
 	// === Output side ===
-	CompletionTokens              int `json:"completion_tokens,omitempty"`                // Total output tokens
-	CompletionReasoningTokens     int `json:"completion_reasoning_tokens,omitempty"`     // Reasoning/thinking tokens (OpenAI: reasoning_tokens, Gemini: thoughtsTokenCount)
-	CompletionAudioTokens         int `json:"completion_audio_tokens,omitempty"`         // Output audio tokens (OpenAI: completion_details.audio_tokens)
-	CompletionAcceptedPrediction  int `json:"completion_accepted_prediction,omitempty"`  // Accepted prediction tokens (OpenAI: accepted_prediction_tokens)
-	CompletionRejectedPrediction  int `json:"completion_rejected_prediction,omitempty"`  // Rejected prediction tokens (OpenAI: rejected_prediction_tokens)
-	ServerToolUseTokens           int `json:"server_tool_use_tokens,omitempty"`           // Server-side tool tokens (Anthropic: server_tool_use_tokens)
+	CompletionTokens             int `json:"completion_tokens,omitempty"`              // Total output tokens
+	CompletionReasoningTokens    int `json:"completion_reasoning_tokens,omitempty"`    // Reasoning/thinking tokens (OpenAI: reasoning_tokens, Gemini: thoughtsTokenCount)
+	CompletionAudioTokens        int `json:"completion_audio_tokens,omitempty"`        // Output audio tokens (OpenAI: completion_details.audio_tokens)
+	CompletionAcceptedPrediction int `json:"completion_accepted_prediction,omitempty"` // Accepted prediction tokens (OpenAI: accepted_prediction_tokens)
+	CompletionRejectedPrediction int `json:"completion_rejected_prediction,omitempty"` // Rejected prediction tokens (OpenAI: rejected_prediction_tokens)
+	ServerToolUseTokens          int `json:"server_tool_use_tokens,omitempty"`         // Server-side tool tokens (Anthropic: server_tool_use_tokens)
 
 	// === Summary ===
 	TotalTokens int `json:"total_tokens,omitempty"` // = PromptTokens + CompletionTokens (usually from upstream)
@@ -286,11 +306,14 @@ type IncompleteDetails struct {
 
 // StreamEvent is a single event in a streaming response.
 type StreamEvent struct {
-	Type              StreamEventType    `json:"type"`
-	Response          *Response          `json:"response,omitempty"`
-	Index             int                `json:"index"`
-	Delta             *ContentPart       `json:"delta,omitempty"`
-	StopReason        *StopReason        `json:"stop_reason,omitempty"`
+	Type       StreamEventType `json:"type"`
+	Response   *Response       `json:"response,omitempty"`
+	Index      int             `json:"index"`
+	Delta      *ContentPart    `json:"delta,omitempty"`
+	StopReason *StopReason     `json:"stop_reason,omitempty"`
+	// StopSequence carries the matched stop sequence when StopReason is
+	// StopReasonStopSequence. Protocols without an equivalent drop it.
+	StopSequence      string             `json:"stop_sequence,omitempty"`
 	Usage             *Usage             `json:"usage,omitempty"`
 	Error             *StreamError       `json:"error,omitempty"`
 	IncompleteDetails *IncompleteDetails `json:"incomplete_details,omitempty"`

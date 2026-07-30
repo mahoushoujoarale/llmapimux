@@ -631,8 +631,13 @@ func TestDecodeOpenAIResponsesRequest_MultimodalPreservesPayloads(t *testing.T) 
 	if len(content) != 3 {
 		t.Fatalf("Content len = %d, want 3", len(content))
 	}
-	if content[0].Image == nil || content[0].Image.URL != "data:image/png;base64,ZmFrZS1pbWFnZQ==" {
-		t.Fatalf("image URL = %+v, want data URL preserved", content[0].Image)
+	// A base64 data URI is decoded into raw bytes + media type, mirroring how
+	// input_file payloads are handled. Keeping the "data:" string in Image.URL
+	// would make cross-protocol encoders emit source.type=url with a data URI,
+	// which Anthropic and Gemini reject.
+	if content[0].Image == nil || string(content[0].Image.Data) != "fake-image" ||
+		content[0].Image.MediaType != "image/png" || content[0].Image.URL != "" {
+		t.Fatalf("image = %+v, want decoded data and media type", content[0].Image)
 	}
 	if content[1].Document == nil || string(content[1].Document.Data) != "fake-pdf" || content[1].Document.Title != "doc.pdf" {
 		t.Fatalf("inline document = %+v, want decoded data and title", content[1].Document)

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	gemini "github.com/mahoushoujoarale/llmapimux/protocol/gemini"
@@ -83,11 +84,18 @@ func geminiSchemaToJSONSchema(geminiRaw json.RawMessage) (json.RawMessage, error
 
 // convertGeminiSchemaToJSON recursively converts a gemini.Schema to a jsonSchemaMap.
 func convertGeminiSchemaToJSON(gs gemini.Schema) jsonSchemaMap {
-	js := jsonSchemaMap{
-		"type": geminiTypeToJSONType(gs.Type),
+	js := jsonSchemaMap{}
+	if gs.Type != "" {
+		js["type"] = geminiTypeToJSONType(gs.Type)
+	}
+	if gs.Format != "" {
+		js["format"] = gs.Format
 	}
 	if gs.Description != "" {
 		js["description"] = gs.Description
+	}
+	if gs.Nullable != nil {
+		js["nullable"] = *gs.Nullable
 	}
 	if len(gs.Properties) > 0 {
 		props := jsonSchemaMap{}
@@ -103,9 +111,79 @@ func convertGeminiSchemaToJSON(gs gemini.Schema) jsonSchemaMap {
 		js["items"] = convertGeminiSchemaToJSON(*gs.Items)
 	}
 	if len(gs.Enum) > 0 {
-		js["enum"] = gs.Enum
+		js["enum"] = geminiEnumToJSON(gs.Enum, gs.Type)
+	}
+	if gs.MinLength != nil {
+		js["minLength"] = *gs.MinLength
+	}
+	if gs.MaxLength != nil {
+		js["maxLength"] = *gs.MaxLength
+	}
+	if gs.Pattern != "" {
+		js["pattern"] = gs.Pattern
+	}
+	if gs.Minimum != nil {
+		js["minimum"] = *gs.Minimum
+	}
+	if gs.Maximum != nil {
+		js["maximum"] = *gs.Maximum
+	}
+	if gs.MinItems != nil {
+		js["minItems"] = *gs.MinItems
+	}
+	if gs.MaxItems != nil {
+		js["maxItems"] = *gs.MaxItems
+	}
+	if len(gs.AnyOf) > 0 {
+		variants := make([]jsonSchemaMap, 0, len(gs.AnyOf))
+		for _, v := range gs.AnyOf {
+			variants = append(variants, convertGeminiSchemaToJSON(v))
+		}
+		js["anyOf"] = variants
+	}
+	// If nothing at all was set, still emit a type so the schema is well-formed.
+	if len(js) == 0 {
+		js["type"] = geminiTypeToJSONType(gs.Type)
 	}
 	return js
+}
+
+// geminiEnumToJSON converts Gemini's always-string enum values back to their JSON
+// Schema types. Gemini serialises integer and number enums as strings, so an
+// INTEGER schema's ["1","2"] must become [1,2] to remain a valid JSON Schema.
+func geminiEnumToJSON(enum []string, geminiType string) []interface{} {
+	values := make([]interface{}, 0, len(enum))
+	switch strings.ToUpper(geminiType) {
+	case "INTEGER":
+		for _, e := range enum {
+			if n, err := strconv.ParseInt(e, 10, 64); err == nil {
+				values = append(values, n)
+				continue
+			}
+			values = append(values, e)
+		}
+	case "NUMBER":
+		for _, e := range enum {
+			if f, err := strconv.ParseFloat(e, 64); err == nil {
+				values = append(values, f)
+				continue
+			}
+			values = append(values, e)
+		}
+	case "BOOLEAN":
+		for _, e := range enum {
+			if b, err := strconv.ParseBool(e); err == nil {
+				values = append(values, b)
+				continue
+			}
+			values = append(values, e)
+		}
+	default:
+		for _, e := range enum {
+			values = append(values, e)
+		}
+	}
+	return values
 }
 
 // jsonSchemaToGeminiSchema converts a JSON Schema (as raw JSON) to a Gemini Schema (as raw JSON).
@@ -126,13 +204,41 @@ func jsonSchemaToGeminiSchema(jsonRaw json.RawMessage) (json.RawMessage, error) 
 }
 
 // convertJSONSchemaToGemini recursively converts a jsonSchemaMap to a gemini.Schema.
+//
+// Keywords Gemini understands (format, nullable, enum, the string/number/array
+// constraints, anyOf) are carried across. oneOf is mapped onto anyOf since Gemini
+// has no exclusive-choice keyword. Keywords with no Gemini equivalent
+// ($defs/$ref, additionalProperties, allOf, not, const) are dropped — Gemini
+// rejects unknown schema fields.
 func convertJSONSchemaToGemini(js jsonSchemaMap) gemini.Schema {
 	gs := gemini.Schema{}
 	if t, ok := js["type"].(string); ok {
 		gs.Type = jsonTypeToGeminiType(t)
+	} else if types, ok := js["type"].([]interface{}); ok {
+		// JSON Schema union type, e.g. ["string","null"] → STRING + nullable.
+		for _, raw := range types {
+			s, ok := raw.(string)
+			if !ok {
+				continue
+			}
+			if s == "null" {
+				nullable := true
+				gs.Nullable = &nullable
+				continue
+			}
+			if gs.Type == "" {
+				gs.Type = jsonTypeToGeminiType(s)
+			}
+		}
+	}
+	if f, ok := js["format"].(string); ok {
+		gs.Format = f
 	}
 	if d, ok := js["description"].(string); ok {
 		gs.Description = d
+	}
+	if n, ok := js["nullable"].(bool); ok {
+		gs.Nullable = &n
 	}
 	if props, ok := js["properties"].(map[string]interface{}); ok {
 		gs.Properties = make(map[string]gemini.Schema, len(props))
@@ -154,13 +260,96 @@ func convertJSONSchemaToGemini(js jsonSchemaMap) gemini.Schema {
 		gs.Items = &converted
 	}
 	if enum, ok := js["enum"].([]interface{}); ok {
+		// Gemini requires enum entries to be strings even for numeric types, so
+		// non-string values are stringified rather than dropped.
 		for _, e := range enum {
-			if s, ok := e.(string); ok {
+			if s, ok := jsonScalarToString(e); ok {
 				gs.Enum = append(gs.Enum, s)
+			}
+		}
+		// An INTEGER/NUMBER schema with a stringified enum needs no type change:
+		// Gemini validates the enum against the declared type.
+	}
+	if v, ok := jsonSchemaInt(js["minLength"]); ok {
+		gs.MinLength = &v
+	}
+	if v, ok := jsonSchemaInt(js["maxLength"]); ok {
+		gs.MaxLength = &v
+	}
+	if p, ok := js["pattern"].(string); ok {
+		gs.Pattern = p
+	}
+	if v, ok := jsonSchemaFloat(js["minimum"]); ok {
+		gs.Minimum = &v
+	}
+	if v, ok := jsonSchemaFloat(js["maximum"]); ok {
+		gs.Maximum = &v
+	}
+	if v, ok := jsonSchemaInt(js["minItems"]); ok {
+		gs.MinItems = &v
+	}
+	if v, ok := jsonSchemaInt(js["maxItems"]); ok {
+		gs.MaxItems = &v
+	}
+	// anyOf, and oneOf folded onto it.
+	for _, key := range []string{"anyOf", "oneOf"} {
+		variants, ok := js[key].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, v := range variants {
+			if vm, ok := v.(map[string]interface{}); ok {
+				gs.AnyOf = append(gs.AnyOf, convertJSONSchemaToGemini(vm))
 			}
 		}
 	}
 	return gs
+}
+
+// jsonScalarToString renders a JSON scalar as a string for Gemini's string-only
+// enum representation. Objects and arrays are not valid enum entries.
+func jsonScalarToString(v interface{}) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case bool:
+		return strconv.FormatBool(t), true
+	case float64:
+		// Render integral floats without a trailing ".0" so an integer enum
+		// round-trips cleanly.
+		if t == float64(int64(t)) {
+			return strconv.FormatInt(int64(t), 10), true
+		}
+		return strconv.FormatFloat(t, 'g', -1, 64), true
+	case json.Number:
+		return t.String(), true
+	default:
+		return "", false
+	}
+}
+
+// jsonSchemaInt extracts an int from a decoded JSON number.
+func jsonSchemaInt(v interface{}) (int, bool) {
+	f, ok := jsonSchemaFloat(v)
+	if !ok {
+		return 0, false
+	}
+	return int(f), true
+}
+
+// jsonSchemaFloat extracts a float64 from a decoded JSON number.
+func jsonSchemaFloat(v interface{}) (float64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return t, true
+	case int:
+		return float64(t), true
+	case json.Number:
+		f, err := t.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
 }
 
 // generateSyntheticID generates a synthetic UUID-like ID for Gemini function calls/responses
@@ -239,6 +428,9 @@ func DecodeGeminiRequest(urlPath string, body []byte) (*Request, error) {
 	model, err := parseGeminiModelFromURL(urlPath)
 	if err != nil {
 		return nil, err
+	}
+	if err := requireJSONObject(body); err != nil {
+		return nil, fmt.Errorf("decode gemini request: %w", err)
 	}
 
 	var raw gemini.Request
@@ -356,12 +548,20 @@ func DecodeGeminiRequest(urlPath string, body []byte) (*Request, error) {
 	// Thinking config (nested inside generationConfig)
 	if raw.GenerationConfig != nil && raw.GenerationConfig.ThinkingConfig != nil {
 		tc := raw.GenerationConfig.ThinkingConfig
-		if tc.ThinkingBudget > 0 {
+		switch {
+		case tc.Budget() > 0:
 			req.Thinking = &ThinkingConfig{
 				Mode:         "enabled",
-				BudgetTokens: tc.ThinkingBudget,
+				BudgetTokens: tc.Budget(),
 			}
-		} else {
+		case tc.Budget() < 0:
+			// Gemini uses -1 for dynamic thinking: the model picks the budget.
+			req.Thinking = &ThinkingConfig{Mode: "adaptive"}
+		case tc.ThinkingBudget != nil:
+			// An explicit thinkingBudget of 0 turns thinking off in Gemini.
+			req.Thinking = &ThinkingConfig{Mode: "disabled"}
+		default:
+			// thinkingConfig present but no budget — let the model decide.
 			req.Thinking = &ThinkingConfig{
 				Mode:         "adaptive",
 				BudgetTokens: 0,
@@ -648,7 +848,7 @@ func EncodeGeminiRequest(req *Request) (model string, body []byte, err error) {
 		if hasTools {
 			toolCount = len(raw.Tools[0].FunctionDeclarations)
 		}
-		effective := sanitizeToolChoiceForEncode(req.ToolChoice, encodedToolNames, toolCount)
+		effective := sanitizeToolChoiceForEncode(req.ToolChoice, encodedToolNames, toolCount, len(req.Tools))
 		if effective != nil {
 			var mode string
 			switch effective.Type {
@@ -716,14 +916,23 @@ func EncodeGeminiRequest(req *Request) (model string, body []byte, err error) {
 		switch req.Thinking.Mode {
 		case "enabled":
 			if req.Thinking.BudgetTokens > 0 {
-				gtc = &gemini.ThinkingConfig{
-					ThinkingBudget: req.Thinking.BudgetTokens,
-				}
+				gtc = &gemini.ThinkingConfig{}
+				gtc.SetThinkingBudget(req.Thinking.BudgetTokens)
+			} else {
+				// codeflicker-fix: LOGIC-Issue-001/tb3m3jp0fdxv42afyew5
+				// OpenAI reasoning_effort has no Gemini budget equivalent. Preserve
+				// enabled intent with an adaptive thinking config instead of dropping it.
+				gtc = &gemini.ThinkingConfig{}
 			}
 		case "adaptive":
-			gtc = &gemini.ThinkingConfig{
-				ThinkingBudget: 0,
-			}
+			// No explicit budget — the model chooses how much to think.
+			gtc = &gemini.ThinkingConfig{}
+		case "disabled":
+			// Gemini enables thinking by default on models that support it, so an
+			// explicit disable must be forwarded as a zero budget. Emitting no
+			// thinkingConfig at all would invert the caller's intent.
+			gtc = &gemini.ThinkingConfig{}
+			gtc.SetThinkingBudget(0)
 		}
 		// Phase 2: IncludeThoughts and Level always propagate when ThinkingConfig is set,
 		// even if Mode doesn't match "enabled"/"adaptive" exactly.
@@ -731,8 +940,12 @@ func EncodeGeminiRequest(req *Request) (model string, body []byte, err error) {
 			gtc = &gemini.ThinkingConfig{}
 		}
 		if gtc != nil {
-			gtc.IncludeThoughts = req.Thinking.IncludeThoughts
-			gtc.ThinkingLevel = req.Thinking.Level
+			if req.Thinking.IncludeThoughts != nil {
+				gtc.IncludeThoughts = req.Thinking.IncludeThoughts
+			}
+			if req.Thinking.Level != "" {
+				gtc.ThinkingLevel = req.Thinking.Level
+			}
 			raw.GenerationConfig.ThinkingConfig = gtc
 		}
 	}
@@ -743,6 +956,57 @@ func EncodeGeminiRequest(req *Request) (model string, body []byte, err error) {
 	}
 
 	return req.Model, bodyBytes, nil
+}
+
+// geminiFunctionResponsePayload builds the function_response.response value.
+//
+// Gemini requires this field to be a google.protobuf.Struct — i.e. a JSON object,
+// never a bare string or scalar. Two cases matter:
+//
+//   - The tool result text is already a JSON object (the common case, and what
+//     DecodeGeminiRequest produces when it stringifies an inbound Struct). It is
+//     passed through verbatim so a Gemini→Gemini round-trip preserves structure
+//     instead of nesting the object inside a JSON string under "result".
+//   - Anything else (plain text, a JSON array, a scalar) is wrapped as
+//     {"result": <text>} because it cannot be a Struct on its own.
+//
+// When the result is an error, an "error" key is added so the model can tell a
+// failure from a success — Gemini has no is_error flag.
+func geminiFunctionResponsePayload(result *ToolResultContent) json.RawMessage {
+	if len(result.Content) == 0 {
+		if !result.IsError {
+			return nil
+		}
+		wrapped, _ := json.Marshal(map[string]any{"error": true})
+		return json.RawMessage(wrapped)
+	}
+
+	text := toolResultText(result)
+
+	// Pass through an existing JSON object unchanged.
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "{") && json.Valid([]byte(trimmed)) {
+		if !result.IsError {
+			return json.RawMessage(trimmed)
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(trimmed), &obj); err == nil {
+			if _, exists := obj["error"]; !exists {
+				obj["error"] = json.RawMessage("true")
+			}
+			if merged, err := json.Marshal(obj); err == nil {
+				return json.RawMessage(merged)
+			}
+		}
+		return json.RawMessage(trimmed)
+	}
+
+	payload := map[string]any{"result": text}
+	if result.IsError {
+		payload["error"] = true
+	}
+	wrapped, _ := json.Marshal(payload)
+	return json.RawMessage(wrapped)
 }
 
 // encodeIRMessageToGemini converts an IR Message to a gemini.Content.
@@ -782,24 +1046,57 @@ func encodeIRMessageToGemini(m Message, toolNameByID map[string]string) gemini.C
 
 	return gemini.Content{
 		Role:  role,
-		Parts: convertIRPartsToGemini(content),
+		Parts: ensureNonEmptyGeminiParts(convertIRPartsToGemini(content)),
 	}
 }
 
+// ensureNonEmptyGeminiParts guarantees at least one part. Gemini rejects a
+// content entry with an empty parts array (400 INVALID_ARGUMENT), which would
+// otherwise happen for a message whose every part was unrepresentable or empty.
+func ensureNonEmptyGeminiParts(parts []gemini.Part) []gemini.Part {
+	if len(parts) > 0 {
+		return parts
+	}
+	return []gemini.Part{{Text: ""}}
+}
+
 // convertIRPartsToGemini converts IR ContentParts to gemini.Parts.
+//
+// Parts with no Gemini representation are rendered as a short text placeholder
+// instead of being dropped: Gemini rejects a content entry whose parts array is
+// empty, and a silent drop hides information from the model.
 func convertIRPartsToGemini(parts []ContentPart) []gemini.Part {
 	result := make([]gemini.Part, 0, len(parts))
 	for _, p := range parts {
 		gp := convertIRPartToGemini(p)
-		// Skip empty parts from unsupported content types to avoid sending
-		// bare {} objects to the Gemini API.
-		if gp.Text == "" && gp.InlineData == nil && gp.FileData == nil &&
-			gp.FunctionCall == nil && gp.FunctionResponse == nil && gp.Thought == nil {
+		if isEmptyGeminiPart(gp) {
+			// Empty text is legitimate for an explicit empty text part; anything
+			// else means the content type had no mapping.
+			if p.Type == ContentTypeText {
+				continue
+			}
+			if text := geminiPlaceholderText(p); text != "" {
+				result = append(result, gemini.Part{Text: text})
+			}
 			continue
 		}
 		result = append(result, gp)
 	}
 	return result
+}
+
+// isEmptyGeminiPart reports whether a part would serialize to a bare {} object.
+func isEmptyGeminiPart(gp gemini.Part) bool {
+	return gp.Text == "" && gp.InlineData == nil && gp.FileData == nil &&
+		gp.FunctionCall == nil && gp.FunctionResponse == nil && gp.Thought == nil
+}
+
+// geminiPlaceholderText renders an IR part that Gemini cannot express as text.
+func geminiPlaceholderText(p ContentPart) string {
+	if p.Type == ContentTypeDocument {
+		return documentPlaceholderText(p.Document)
+	}
+	return unrepresentablePlaceholderText(p)
 }
 
 // convertIRPartToGemini converts a single IR ContentPart to a gemini.Part.
@@ -868,18 +1165,10 @@ func convertIRPartToGemini(p ContentPart) gemini.Part {
 
 	case ContentTypeToolResult:
 		if p.ToolResult != nil {
-			// Extract text from the result content and wrap in a JSON object.
-			// Gemini requires function_response.response to be a google.protobuf.Struct
-			// (i.e. a JSON object), not a plain string or scalar value.
-			var responseData json.RawMessage
-			if len(p.ToolResult.Content) > 0 {
-				wrapped, _ := json.Marshal(map[string]any{"result": toolResultText(p.ToolResult)})
-				responseData = json.RawMessage(wrapped)
-			}
 			return gemini.Part{
 				FunctionResponse: &gemini.FunctionResponse{
 					Name:     p.ToolResult.Name,
-					Response: responseData,
+					Response: geminiFunctionResponsePayload(p.ToolResult),
 					ID:       p.ToolResult.ToolUseID,
 				},
 			}
@@ -920,12 +1209,12 @@ func DecodeGeminiResponse(body []byte) (*Response, error) {
 	// Usage
 	if raw.UsageMetadata != nil {
 		resp.Usage = Usage{
-			PromptTokens:             raw.UsageMetadata.PromptTokenCount,
-			PromptCacheHitTokens:     raw.UsageMetadata.CachedContentTokenCount,
-			CompletionTokens:         raw.UsageMetadata.CandidatesTokenCount,
+			PromptTokens:              raw.UsageMetadata.PromptTokenCount,
+			PromptCacheHitTokens:      raw.UsageMetadata.CachedContentTokenCount,
+			CompletionTokens:          raw.UsageMetadata.CandidatesTokenCount,
 			CompletionReasoningTokens: raw.UsageMetadata.ThoughtsTokenCount,
-			ServerToolUseTokens:      raw.UsageMetadata.ToolUsePromptTokenCount,
-			TotalTokens:              raw.UsageMetadata.TotalTokenCount,
+			ServerToolUseTokens:       raw.UsageMetadata.ToolUsePromptTokenCount,
+			TotalTokens:               raw.UsageMetadata.TotalTokenCount,
 		}
 	}
 
@@ -997,6 +1286,10 @@ func DecodeGeminiResponse(body []byte) (*Response, error) {
 }
 
 // stopReasonToGeminiFinishReason converts a unified IR StopReason to the Gemini finishReason string.
+//
+// Gemini's finishReason is a closed enum, so unrecognised IR reasons (e.g.
+// Anthropic's "refusal") are bucketed onto the closest valid value rather than
+// being forwarded verbatim.
 func stopReasonToGeminiFinishReason(r StopReason) string {
 	switch r {
 	case StopReasonEndTurn:
@@ -1011,9 +1304,38 @@ func stopReasonToGeminiFinishReason(r StopReason) string {
 		return "STOP"
 	case StopReasonPauseTurn:
 		return "MAX_TOKENS"
+	case "":
+		return ""
 	default:
-		return string(r)
+		// Already a Gemini enum value (round-trip of an unmapped reason such as
+		// RECITATION or BLOCKLIST) — keep it. Otherwise bucket via the shared
+		// OpenAI heuristic and translate.
+		if isGeminiFinishReason(string(r)) {
+			return string(r)
+		}
+		switch openAIFinishReasonFallback(string(r)) {
+		case "length":
+			return "MAX_TOKENS"
+		case "content_filter":
+			return "SAFETY"
+		default:
+			return "STOP"
+		}
 	}
+}
+
+// isGeminiFinishReason reports whether s is already a documented Gemini
+// finishReason value, which happens when a Gemini→Gemini round-trip carries a
+// reason the IR does not model.
+func isGeminiFinishReason(s string) bool {
+	switch s {
+	case "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "LANGUAGE", "OTHER",
+		"BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "MALFORMED_FUNCTION_CALL",
+		"IMAGE_SAFETY", "UNEXPECTED_TOOL_CALL", "STOP_SEQUENCE",
+		"FINISH_REASON_UNSPECIFIED":
+		return true
+	}
+	return false
 }
 
 // EncodeGeminiResponse encodes a unified IR Response into a Gemini GenerateContent API JSON body.
@@ -1030,15 +1352,23 @@ func EncodeGeminiResponse(resp *Response) ([]byte, error) {
 
 	finishReason := stopReasonToGeminiFinishReason(resp.StopReason)
 
-	raw.Candidates = []gemini.Candidate{
-		{
-			Content: &gemini.Content{
-				Role:  "model",
-				Parts: parts,
-			},
-			FinishReason: finishReason,
+	candidate := gemini.Candidate{
+		Content: &gemini.Content{
+			Role:  "model",
+			Parts: parts,
 		},
+		FinishReason: finishReason,
 	}
+
+	// Citations are candidate-level in Gemini; collect them back from the
+	// per-part IR representation and re-base their offsets onto the concatenated
+	// candidate text. This is the inverse of distributeCitationsToTextParts, so
+	// citations survive a round-trip instead of being decode-only.
+	if cm := collectGeminiCitationMetadata(resp.Content); cm != nil {
+		candidate.CitationMetadata = cm
+	}
+
+	raw.Candidates = []gemini.Candidate{candidate}
 
 	// Usage
 	raw.UsageMetadata = &gemini.UsageMetadata{
@@ -1051,6 +1381,38 @@ func EncodeGeminiResponse(resp *Response) ([]byte, error) {
 	}
 
 	return json.Marshal(raw)
+}
+
+// collectGeminiCitationMetadata is the inverse of distributeCitationsToTextParts:
+// it gathers per-part IR citations back into candidate-level citationMetadata,
+// re-basing each offset onto the concatenated candidate text. Returns nil when
+// there are no citations.
+func collectGeminiCitationMetadata(content []ContentPart) *gemini.CitationMetadata {
+	var sources []gemini.CitationSource
+	offset := 0
+	for _, p := range content {
+		if p.Type != ContentTypeText || p.Text == nil {
+			continue
+		}
+		for _, c := range p.Citations {
+			src := gemini.CitationSource{
+				URI:   c.URL,
+				Title: c.Title,
+			}
+			if c.Start != nil {
+				src.StartIndex = *c.Start + offset
+			}
+			if c.End != nil {
+				src.EndIndex = *c.End + offset
+			}
+			sources = append(sources, src)
+		}
+		offset += len(p.Text.Text)
+	}
+	if len(sources) == 0 {
+		return nil
+	}
+	return &gemini.CitationMetadata{CitationSources: sources}
 }
 
 // --- Streaming decode/encode ---
@@ -1094,25 +1456,31 @@ func DecodeGeminiStreamChunk(data []byte) ([]*StreamEvent, error) {
 		}
 	}
 
-	// Determine stop reason
+	// Determine stop reason. Mirror the non-streaming DecodeGeminiResponse
+	// precedence: an explicit finishReason such as MAX_TOKENS or SAFETY always
+	// wins, and tool_use is only inferred when the reason is ambiguous (STOP or
+	// absent). Previously any functionCall unconditionally forced tool_use, which
+	// masked truncation and safety blocks in the streaming path.
 	var stopReason *StopReason
 	if finishReason != "" || hasFunctionCall {
 		var sr StopReason
-		if hasFunctionCall {
-			sr = StopReasonToolUse
-		} else {
-			switch finishReason {
-			case "STOP":
+		switch finishReason {
+		case "STOP":
+			if hasFunctionCall {
+				sr = StopReasonToolUse
+			} else {
 				sr = StopReasonEndTurn
-			case "MAX_TOKENS":
-				sr = StopReasonMaxTokens
-			case "SAFETY":
-				sr = StopReasonContentFilter
-			case "STOP_SEQUENCE":
-				sr = StopReasonStopSequence
-			default:
-				sr = StopReason(finishReason)
 			}
+		case "MAX_TOKENS":
+			sr = StopReasonMaxTokens
+		case "SAFETY":
+			sr = StopReasonContentFilter
+		case "STOP_SEQUENCE":
+			sr = StopReasonStopSequence
+		case "":
+			sr = StopReasonToolUse // hasFunctionCall is necessarily true here
+		default:
+			sr = StopReason(finishReason)
 		}
 		stopReason = &sr
 	}
@@ -1121,12 +1489,12 @@ func DecodeGeminiStreamChunk(data []byte) ([]*StreamEvent, error) {
 	var usage *Usage
 	if raw.UsageMetadata != nil {
 		usage = &Usage{
-			PromptTokens:             raw.UsageMetadata.PromptTokenCount,
-			PromptCacheHitTokens:     raw.UsageMetadata.CachedContentTokenCount,
-			CompletionTokens:         raw.UsageMetadata.CandidatesTokenCount,
+			PromptTokens:              raw.UsageMetadata.PromptTokenCount,
+			PromptCacheHitTokens:      raw.UsageMetadata.CachedContentTokenCount,
+			CompletionTokens:          raw.UsageMetadata.CandidatesTokenCount,
 			CompletionReasoningTokens: raw.UsageMetadata.ThoughtsTokenCount,
-			ServerToolUseTokens:      raw.UsageMetadata.ToolUsePromptTokenCount,
-			TotalTokens:              raw.UsageMetadata.TotalTokenCount,
+			ServerToolUseTokens:       raw.UsageMetadata.ToolUsePromptTokenCount,
+			TotalTokens:               raw.UsageMetadata.TotalTokenCount,
 		}
 	}
 
@@ -1167,6 +1535,11 @@ func DecodeGeminiStreamChunk(data []byte) ([]*StreamEvent, error) {
 // EncodeGeminiStreamChunk encodes a unified IR StreamEvent into a Gemini
 // GenerateContentResponse JSON chunk (suitable for an SSE "data:" line).
 func EncodeGeminiStreamChunk(event *StreamEvent) ([]byte, error) {
+	// A nil event is a "nothing to emit" signal from an upstream decoder that saw a
+	// chunk it does not map. Treat it as a skip rather than dereferencing it.
+	if event == nil {
+		return nil, nil
+	}
 	raw := gemini.Response{}
 
 	switch event.Type {
@@ -1220,7 +1593,9 @@ func EncodeGeminiStreamChunk(event *StreamEvent) ([]byte, error) {
 		raw.Candidates = []gemini.Candidate{cand}
 
 	case StreamEventContentBlockStart, StreamEventContentBlockStop:
-		// These lifecycle events have no equivalent in Gemini streaming; skip silently.
+		// Block lifecycle has no Gemini representation. Tool-call name/args
+		// assembly is handled by geminiCodec.WriteStreamingResponse, which buffers
+		// the fragments and emits one complete functionCall part.
 		return nil, nil
 
 	case StreamEventError:
