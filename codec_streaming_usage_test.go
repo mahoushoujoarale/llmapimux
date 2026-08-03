@@ -1,10 +1,14 @@
 package llmapimux
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/mahoushoujoarale/llmapimux/protocol/openairesponses"
 )
 
 // ---------------------------------------------------------------------------
@@ -31,8 +35,8 @@ func anthropicStyleStreamEvents() []StreamResult {
 				ID:    "msg_test",
 				Model: "claude-sonnet-4-20250514",
 				Usage: Usage{
-					PromptTokens:          50,
-					PromptCacheHitTokens:  10,
+					PromptTokens:           50,
+					PromptCacheHitTokens:   10,
 					PromptCacheWriteTokens: 5,
 				},
 			},
@@ -335,6 +339,150 @@ func TestOpenAIResponsesCodec_Stream_MaxTokensStopReason(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesCodec_Stream_NormalizesIncompleteTextLifecycle(t *testing.T) {
+	endTurn := StopReasonEndTurn
+	body := sendStreamToCodec(&openaiResponsesCodec{}, []StreamResult{
+		{Event: &StreamEvent{
+			Type: StreamEventStart,
+			Response: &Response{
+				ID:    "resp_upstream",
+				Model: "deepseek-v4-flash",
+				Usage: Usage{PromptTokens: 5},
+			},
+		}},
+		{Event: &StreamEvent{Type: StreamEventDelta, Index: 0, Delta: &ContentPart{
+			Type: ContentTypeText, Text: &TextContent{Text: "Hello"},
+		}}},
+		{Event: &StreamEvent{Type: StreamEventDelta, Index: 0, Delta: &ContentPart{
+			Type: ContentTypeText, Text: &TextContent{Text: " world"},
+		}}},
+		{Event: &StreamEvent{Type: StreamEventStop, StopReason: &endTurn, Usage: &Usage{CompletionTokens: 2}}},
+	})
+
+	type frame struct {
+		event string
+		data  openairesponses.StreamEvent
+	}
+	reader := NewSSEReader(bytes.NewBufferString(body))
+	var frames []frame
+	for {
+		data, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read SSE frame: %v", err)
+		}
+		var event openairesponses.StreamEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			t.Fatalf("decode %s: %v; body:\n%s", reader.LastEventType(), err, body)
+		}
+		frames = append(frames, frame{event: reader.LastEventType(), data: event})
+	}
+
+	wantTypes := []string{
+		"response.created", "response.in_progress",
+		"response.output_item.added", "response.content_part.added",
+		"response.output_text.delta", "response.output_text.delta",
+		"response.output_text.done", "response.content_part.done",
+		"response.output_item.done", "response.completed",
+	}
+	if len(frames) != len(wantTypes) {
+		t.Fatalf("event count = %d, want %d; body:\n%s", len(frames), len(wantTypes), body)
+	}
+	for i, want := range wantTypes {
+		if frames[i].event != want || frames[i].data.Type != want {
+			t.Errorf("event %d = (%q, %q), want (%q, %q)", i, frames[i].event, frames[i].data.Type, want, want)
+		}
+		if frames[i].data.SequenceNumber == nil || *frames[i].data.SequenceNumber != i+1 {
+			t.Errorf("event %q sequence_number = %v, want %d", want, frames[i].data.SequenceNumber, i+1)
+		}
+	}
+
+	created := frames[0].data.Response
+	if created == nil || created.ID != "resp_upstream" {
+		t.Fatalf("created response = %#v, want non-empty upstream ID", created)
+	}
+	item := frames[2].data.Item
+	if item == nil || item.ID == "" {
+		t.Fatalf("output item = %#v, want non-empty ID", item)
+	}
+	for _, index := range []int{3, 4, 5, 6, 7, 8} {
+		if frames[index].data.ItemID != item.ID {
+			t.Errorf("event %q item_id = %q, want %q", frames[index].event, frames[index].data.ItemID, item.ID)
+		}
+		if frames[index].data.OutputIndex == nil || *frames[index].data.OutputIndex != 0 {
+			t.Errorf("event %q output_index = %v, want 0", frames[index].event, frames[index].data.OutputIndex)
+		}
+	}
+	completed := frames[len(frames)-1].data.Response
+	if completed == nil || completed.ID != created.ID || len(completed.Output) != 1 || completed.Output[0].Content[0].Text != "Hello world" {
+		t.Errorf("completed response = %#v, want complete response output", completed)
+	}
+	if completed == nil || completed.Usage == nil || completed.Usage.InputTokens != 5 || completed.Usage.OutputTokens != 2 {
+		t.Errorf("completed usage = %#v, want input=5 output=2", completed)
+	}
+}
+
+func TestOpenAIResponsesCodec_Stream_SeparatesReasoningTextAndToolItems(t *testing.T) {
+	endTurn := StopReasonEndTurn
+	body := sendStreamToCodec(&openaiResponsesCodec{}, []StreamResult{
+		{Event: &StreamEvent{Type: StreamEventStart, Response: &Response{ID: "resp_mixed"}}},
+		{Event: &StreamEvent{Type: StreamEventDelta, Index: 7, Delta: &ContentPart{Type: ContentTypeThinking, Thinking: &ThinkingContent{Thinking: "consider"}}}},
+		{Event: &StreamEvent{Type: StreamEventDelta, Index: 7, Delta: &ContentPart{Type: ContentTypeText, Text: &TextContent{Text: "answer"}}}},
+		{Event: &StreamEvent{Type: StreamEventDelta, Index: 8, Delta: &ContentPart{Type: ContentTypeToolUse, ToolUse: &ToolUseContent{ID: "call_1", Name: "weather", Arguments: json.RawMessage(`{"city":"Paris"}`)}}}},
+		{Event: &StreamEvent{Type: StreamEventStop, StopReason: &endTurn}},
+	})
+
+	reader := NewSSEReader(bytes.NewBufferString(body))
+	items := map[string]openairesponses.OutputItem{}
+	for {
+		data, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read SSE frame: %v", err)
+		}
+		var event openairesponses.StreamEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			t.Fatalf("decode SSE frame: %v", err)
+		}
+		if reader.LastEventType() == "response.output_item.added" && event.Item != nil {
+			items[event.Item.Type] = *event.Item
+		}
+	}
+
+	if len(items) != 3 {
+		t.Fatalf("output item types = %#v, want reasoning, message, function_call; body:\n%s", items, body)
+	}
+	if items["reasoning"].ID == "" || items["message"].ID == "" || items["function_call"].ID == "" {
+		t.Errorf("item IDs must be non-empty: %#v", items)
+	}
+	if items["reasoning"].ID == items["message"].ID || items["message"].ID == items["function_call"].ID || items["reasoning"].ID == items["function_call"].ID {
+		t.Errorf("output item IDs must be distinct: %#v", items)
+	}
+	if items["function_call"].CallID != "call_1" || items["function_call"].Name != "weather" {
+		t.Errorf("function call = %#v, want call_1/weather", items["function_call"])
+	}
+	if !strings.Contains(body, `event: response.function_call_arguments.delta`) || !strings.Contains(body, `event: response.function_call_arguments.done`) {
+		t.Errorf("tool arguments lifecycle missing:\n%s", body)
+	}
+}
+
+func TestOpenAIResponsesCodec_Stream_ErrorDoesNotComplete(t *testing.T) {
+	body := sendStreamToCodec(&openaiResponsesCodec{}, []StreamResult{
+		{Event: &StreamEvent{Type: StreamEventStart, Response: &Response{ID: "resp_error"}}},
+		{Event: &StreamEvent{Type: StreamEventError, Error: &StreamError{Type: "overloaded_error", Message: "upstream aborted"}}},
+	})
+	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"type":"error"`) || !strings.Contains(body, `"message":"upstream aborted"`) {
+		t.Errorf("missing OpenAI Responses error event:\n%s", body)
+	}
+	if strings.Contains(body, "event: response.completed") {
+		t.Errorf("error stream must not emit response.completed:\n%s", body)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Gemini codec tests
 // ---------------------------------------------------------------------------
@@ -346,7 +494,7 @@ func TestGeminiCodec_Stream_AnthropicStyleUsage(t *testing.T) {
 	type geminiChunk struct {
 		UsageMetadata *struct {
 			PromptTokenCount        int `json:"promptTokenCount,omitempty"`
-			CandidatesTokenCount   int `json:"candidatesTokenCount,omitempty"`
+			CandidatesTokenCount    int `json:"candidatesTokenCount,omitempty"`
 			CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
 		} `json:"usageMetadata,omitempty"`
 		Candidates []struct {

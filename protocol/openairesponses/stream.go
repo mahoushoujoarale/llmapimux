@@ -19,4 +19,11 @@ type StreamEvent struct {
 	// response.output_text.delta / response.function_call_arguments.delta
 	Delta  string `json:"delta,omitempty"`
 	ItemID string `json:"item_id,omitempty"`
+
+	// response.output_text.done / response.refusal.done
+	Text    string `json:"text,omitempty"`
+	Refusal string `json:"refusal,omitempty"`
+
+	// Monotonically increasing sequence number across a single response stream.
+	SequenceNumber *int `json:"sequence_number,omitempty"`
 }

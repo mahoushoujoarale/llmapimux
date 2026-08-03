@@ -503,47 +503,65 @@ func assembleOpenAIChatStream(raw string) (assembledStream, []string) {
 	return out, problems
 }
 
-// assembleOpenAIResponsesStream reassembles a Responses event stream.
+// assembleOpenAIResponsesStream reassembles and validates a Responses event stream.
 func assembleOpenAIResponsesStream(raw string) (assembledStream, []string) {
 	var out assembledStream
 	var problems []string
-	add := func(format string, args ...any) {
-		problems = append(problems, fmt.Sprintf(format, args...))
-	}
+	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
 
 	var text, thinking strings.Builder
 	toolByIndex := map[int]*struct {
 		name string
 		args strings.Builder
 	}{}
+	activeItems := map[string]bool{}
+	activeParts := map[string]bool{}
+	itemByIndex := map[int]string{}
 	var toolOrder []int
-	sawCreated := false
-	sawTerminal := false
+	var responseID string
+	previousSequence := 0
+	sawCreated, sawProgress, sawTerminal := false, false, false
 
+	partKey := func(itemID string, contentIndex int) string {
+		return fmt.Sprintf("%s:%d", itemID, contentIndex)
+	}
 	for _, f := range parseSSEFrames(raw) {
 		if f.event == "" {
 			add("Responses streams require event: lines")
 			continue
 		}
 		var ev struct {
-			Type        string `json:"type"`
-			OutputIndex *int   `json:"output_index"`
-			Delta       string `json:"delta"`
-			Item        *struct {
+			Type           string `json:"type"`
+			OutputIndex    *int   `json:"output_index"`
+			ContentIndex   *int   `json:"content_index"`
+			ItemID         string `json:"item_id"`
+			Delta          string `json:"delta"`
+			SequenceNumber *int   `json:"sequence_number"`
+			Item           *struct {
+				ID     string `json:"id"`
 				Type   string `json:"type"`
 				Name   string `json:"name"`
 				CallID string `json:"call_id"`
 			} `json:"item"`
 			Response *struct {
-				Status string `json:"status"`
+				ID     string     `json:"id"`
+				Status string     `json:"status"`
+				Output []struct{} `json:"output"`
 			} `json:"response"`
 		}
 		if err := json.Unmarshal([]byte(f.data), &ev); err != nil {
 			add("event %s data is not JSON: %v", f.event, err)
 			continue
 		}
-		if ev.Type != "" && ev.Type != f.event {
+		if ev.Type != f.event {
 			add("event line %q does not match payload type %q", f.event, ev.Type)
+		}
+		if f.event != "error" {
+			if ev.SequenceNumber == nil || *ev.SequenceNumber <= previousSequence {
+				add("event %q sequence_number = %v, must be strictly increasing", f.event, ev.SequenceNumber)
+			} else {
+				previousSequence = *ev.SequenceNumber
+			}
 		}
 		idx := 0
 		if ev.OutputIndex != nil {
@@ -552,51 +570,119 @@ func assembleOpenAIResponsesStream(raw string) (assembledStream, []string) {
 
 		switch f.event {
 		case "response.created":
-			sawCreated = true
-		case "response.output_item.added":
-			if ev.Item != nil && ev.Item.Type == "function_call" {
-				entry, ok := toolByIndex[idx]
-				if !ok {
-					entry = &struct {
-						name string
-						args strings.Builder
-					}{}
-					toolByIndex[idx] = entry
-					toolOrder = append(toolOrder, idx)
-				}
-				entry.name = ev.Item.Name
+			if sawCreated {
+				add("duplicate response.created")
 			}
-		case "response.output_text.delta":
-			text.WriteString(ev.Delta)
-		case "response.reasoning_summary_text.delta":
-			thinking.WriteString(ev.Delta)
-		case "response.function_call_arguments.delta":
-			entry, ok := toolByIndex[idx]
-			if !ok {
-				entry = &struct {
+			sawCreated = true
+			if ev.Response == nil || ev.Response.ID == "" {
+				add("response.created has no response ID")
+			} else {
+				responseID = ev.Response.ID
+			}
+		case "response.in_progress":
+			if !sawCreated {
+				add("response.in_progress before response.created")
+			}
+			sawProgress = true
+		case "response.output_item.added":
+			if !sawProgress {
+				add("response.output_item.added before response.in_progress")
+			}
+			if ev.Item == nil || ev.Item.ID == "" {
+				add("response.output_item.added has no item ID")
+				continue
+			}
+			activeItems[ev.Item.ID] = true
+			itemByIndex[idx] = ev.Item.ID
+			if ev.Item.Type == "function_call" {
+				entry := &struct {
 					name string
 					args strings.Builder
-				}{}
+				}{name: ev.Item.Name}
 				toolByIndex[idx] = entry
 				toolOrder = append(toolOrder, idx)
 			}
-			entry.args.WriteString(ev.Delta)
-		case "response.output_item.done", "response.content_part.added",
-			"response.content_part.done", "response.refusal.delta":
-			// Lifecycle / non-text events.
-		case "response.completed", "response.incomplete", "response.failed", "error":
-			sawTerminal = true
-			if f.event == "response.completed" && ev.Response != nil &&
-				!isOpenAIResponsesStatus(ev.Response.Status) {
-				add("response.completed status %q is not valid", ev.Response.Status)
+		case "response.content_part.added":
+			if ev.ItemID == "" || !activeItems[ev.ItemID] {
+				add("response.content_part.added without active item %q", ev.ItemID)
 			}
+			if ev.ContentIndex == nil {
+				add("response.content_part.added has no content_index")
+			} else {
+				activeParts[partKey(ev.ItemID, *ev.ContentIndex)] = true
+			}
+		case "response.output_text.delta", "response.refusal.delta":
+			if ev.ItemID == "" || !activeItems[ev.ItemID] {
+				add("%s without active item %q", f.event, ev.ItemID)
+			}
+			if ev.ContentIndex == nil || !activeParts[partKey(ev.ItemID, derefIntPtr(ev.ContentIndex))] {
+				add("%s without active content part", f.event)
+			}
+			if f.event == "response.output_text.delta" {
+				text.WriteString(ev.Delta)
+			}
+		case "response.reasoning_summary_text.delta":
+			if ev.ItemID == "" || !activeItems[ev.ItemID] {
+				add("reasoning delta without active item %q", ev.ItemID)
+			}
+			thinking.WriteString(ev.Delta)
+		case "response.function_call_arguments.delta":
+			if ev.ItemID == "" || !activeItems[ev.ItemID] {
+				add("tool arguments delta without active item %q", ev.ItemID)
+			}
+			entry, ok := toolByIndex[idx]
+			if !ok {
+				add("tool arguments delta(index=%d) without function_call item", idx)
+				continue
+			}
+			entry.args.WriteString(ev.Delta)
+		case "response.output_text.done", "response.refusal.done", "response.content_part.done":
+			if ev.ItemID == "" || !activeItems[ev.ItemID] {
+				add("%s without active item %q", f.event, ev.ItemID)
+			}
+			if ev.ContentIndex == nil || !activeParts[partKey(ev.ItemID, derefIntPtr(ev.ContentIndex))] {
+				add("%s without active content part", f.event)
+			} else if f.event == "response.content_part.done" {
+				delete(activeParts, partKey(ev.ItemID, *ev.ContentIndex))
+			}
+		case "response.function_call_arguments.done":
+			if ev.ItemID == "" || !activeItems[ev.ItemID] {
+				add("tool arguments done without active item %q", ev.ItemID)
+			}
+		case "response.output_item.done":
+			itemID := ev.ItemID
+			if itemID == "" && ev.Item != nil {
+				itemID = ev.Item.ID
+			}
+			if itemID == "" || !activeItems[itemID] {
+				add("response.output_item.done without active item %q", itemID)
+			}
+			delete(activeItems, itemID)
+		case "response.completed", "response.incomplete", "response.failed":
+			sawTerminal = true
+			if len(activeItems) != 0 || len(activeParts) != 0 {
+				add("terminal event while output lifecycle remains open")
+			}
+			if ev.Response == nil || ev.Response.ID == "" || ev.Response.ID != responseID {
+				add("terminal response has inconsistent ID")
+			}
+			if ev.Response != nil && !isOpenAIResponsesStatus(ev.Response.Status) {
+				add("terminal response status %q is not valid", ev.Response.Status)
+			}
+			if f.event == "response.completed" && (ev.Response == nil || len(ev.Response.Output) == 0) {
+				add("response.completed has no final output")
+			}
+		case "error":
+			sawTerminal = true
 		default:
 			add("unknown Responses SSE event %q", f.event)
 		}
 	}
-
 	if !sawCreated {
 		add("stream has no response.created")
+	}
+	if !sawProgress {
+		add("stream has no response.in_progress")
 	}
 	if !sawTerminal {
 		add("stream has no terminal event (response.completed/failed/incomplete/error)")
@@ -607,8 +693,7 @@ func assembleOpenAIResponsesStream(raw string) (assembledStream, []string) {
 		out.toolNames = append(out.toolNames, toolByIndex[idx].name)
 		out.toolArgs = append(out.toolArgs, toolByIndex[idx].args.String())
 	}
-	out.text = text.String()
-	out.thinking = thinking.String()
+	out.text, out.thinking = text.String(), thinking.String()
 	return out, problems
 }
 
