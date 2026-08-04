@@ -1848,7 +1848,7 @@ func TestHandler_OutboundExtra_NilModifier(t *testing.T) {
 	}
 }
 
-func TestHandler_NonStreaming_SetsXRequestIdHeader(t *testing.T) {
+func TestHandler_NonStreaming_XRequestIdNotSetByDefault(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`))
@@ -1867,19 +1867,37 @@ func TestHandler_NonStreaming_SetsXRequestIdHeader(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status = %d", w.Code)
 	}
-	reqID := w.Header().Get("X-Request-Id")
-	if reqID == "" {
-		t.Fatal("X-Request-Id header is missing")
-	}
-	if len(strings.Split(reqID, "-")) != 5 {
-		t.Errorf("X-Request-Id = %q, want UUID format", reqID)
+	if w.Header().Get("X-Request-Id") != "" {
+		t.Errorf("X-Request-Id should not be set by default (caller is responsible), got: %q", w.Header().Get("X-Request-Id"))
 	}
 }
 
-func TestHandler_Streaming_SetsXRequestIdHeader(t *testing.T) {
+func TestHandler_NonStreaming_XRequestIdPreservedWhenPreSet(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+
+	h := &Handler{
+		codec:  &openaiChatCodec{},
+		router: &staticRouter{result: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: upstream.URL, APIKey: "sk-test", Model: "gpt-4o"}},
+	}
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	w.Header().Set("X-Request-Id", "12345678")
+	h.ServeHTTP(w, r)
+
+	if w.Header().Get("X-Request-Id") != "12345678" {
+		t.Errorf("X-Request-Id = %q, want 12345678 (pre-set value preserved)", w.Header().Get("X-Request-Id"))
+	}
+}
+
+func TestHandler_Streaming_XRequestIdPreservedWhenPreSet(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1,\"total_tokens\":6}}\n\ndata: [DONE]\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n")
 	}))
 	defer upstream.Close()
 
@@ -1890,36 +1908,11 @@ func TestHandler_Streaming_SetsXRequestIdHeader(t *testing.T) {
 	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
 	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	w := httptest.NewRecorder()
+	w.Header().Set("X-Request-Id", "99999")
 	h.ServeHTTP(w, r)
 
-	if w.Code != 200 {
-		t.Fatalf("status = %d", w.Code)
-	}
-	reqID := w.Header().Get("X-Request-Id")
-	if reqID == "" {
-		t.Fatal("X-Request-Id header is missing in streaming response")
-	}
-}
-
-func TestHandler_XRequestId_PreSetValueNotOverwritten(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`))
-	}))
-	defer upstream.Close()
-
-	h := &Handler{
-		codec:  &openaiChatCodec{},
-		router: &staticRouter{result: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: upstream.URL, APIKey: "sk-test", Model: "gpt-4o"}},
-	}
-	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
-	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	w.Header().Set("X-Request-Id", "caller-id-123")
-	h.ServeHTTP(w, r)
-
-	if w.Header().Get("X-Request-Id") != "caller-id-123" {
-		t.Errorf("X-Request-Id = %q, want caller-id-123 (pre-set value should not be overwritten)", w.Header().Get("X-Request-Id"))
+	if w.Header().Get("X-Request-Id") != "99999" {
+		t.Errorf("X-Request-Id = %q, want 99999 (pre-set value preserved in streaming)", w.Header().Get("X-Request-Id"))
 	}
 }
 

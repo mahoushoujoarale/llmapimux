@@ -480,9 +480,6 @@ func (s *retryLoopState) handleNonStreaming(resp *Response, firstByteTime time.T
 		return
 	}
 	s.w.Header().Set("Content-Type", "application/json")
-	if s.w.Header().Get("X-Request-Id") == "" {
-		s.w.Header().Set("X-Request-Id", s.info.RequestID)
-	}
 	s.w.WriteHeader(http.StatusOK)
 	_, err = s.w.Write(data)
 }
@@ -622,9 +619,6 @@ func (s *retryLoopState) handleStreaming(ch <-chan StreamResult) {
 
 	s.w.Header().Set("Content-Type", "text/event-stream")
 	s.w.Header().Set("Cache-Control", "no-cache")
-	if s.w.Header().Get("X-Request-Id") == "" {
-		s.w.Header().Set("X-Request-Id", s.info.RequestID)
-	}
 	s.w.WriteHeader(http.StatusOK)
 	s.h.codec.WriteStreamingResponse(NewSSEWriter(s.w), wrappedCh)
 
