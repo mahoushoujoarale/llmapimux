@@ -36,6 +36,9 @@ func (c *openaiChatCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan
 	completed := false
 	var accumulatedUsage Usage
 	var lastStopReason StopReason
+	var streamCreated int64
+	var streamID string
+	var streamModel string
 
 	for result := range ch {
 		if result.Err != nil {
@@ -63,6 +66,12 @@ func (c *openaiChatCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan
 			// but message_stop decodes to StreamEventStop with nil StopReason.
 			if result.Event.StopReason != nil {
 				lastStopReason = *result.Event.StopReason
+			}
+			// Capture ID/Model/Created from the start event for propagation.
+			if result.Event.Type == StreamEventStart && result.Event.Response != nil {
+				streamID = result.Event.Response.ID
+				streamModel = result.Event.Response.Model
+				streamCreated = result.Event.Response.Created
 			}
 		}
 
@@ -104,6 +113,17 @@ func (c *openaiChatCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan
 			return
 		}
 
+		// Propagate ID/Model/Created to delta and stop events so every chunk
+		// carries these fields, matching OpenAI's streaming behavior.
+		if result.Event != nil && result.Event.Response == nil &&
+			(streamID != "" || streamModel != "" || streamCreated != 0) {
+			result.Event.Response = &Response{
+				ID:      streamID,
+				Model:   streamModel,
+				Created: streamCreated,
+			}
+		}
+
 		data, err := EncodeOpenAIChatStreamChunk(result.Event)
 		if err != nil {
 			break
@@ -137,6 +157,7 @@ func writeOpenAIChatStreamErrorPayload(sseWriter *SSEWriter, errType, code, mess
 	payload := map[string]any{
 		"message": message,
 		"type":    errType,
+		"param":   nil,
 	}
 	if code != "" {
 		payload["code"] = code
@@ -160,6 +181,7 @@ func writeOpenAIError(w http.ResponseWriter, statusCode int, message string) {
 			"message": message,
 			"type":    "invalid_request_error",
 			"code":    nil,
+			"param":   nil,
 		},
 	})
 	w.Header().Set("Content-Type", "application/json")

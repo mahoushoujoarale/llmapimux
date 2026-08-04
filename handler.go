@@ -20,6 +20,7 @@ type Handler struct {
 	stats             StatsReporter
 	reqMod            RequestModifier // nil = no modification
 	attemptController AttemptController
+	preserveOriginalModel bool
 }
 
 // buildSendError constructs a SendError from the error returned by Send/SendStream.
@@ -469,12 +470,19 @@ func (s *retryLoopState) handleNonStreaming(resp *Response, firstByteTime time.T
 		TTFB:      ttfb,
 	})
 
+	if s.h.preserveOriginalModel && s.req.OriginalModel != "" && resp != nil {
+		resp.Model = s.req.OriginalModel
+	}
+
 	data, err := s.h.codec.EncodeResponse(resp)
 	if err != nil {
 		s.h.codec.WriteError(s.w, 502, "failed to encode response: "+err.Error())
 		return
 	}
 	s.w.Header().Set("Content-Type", "application/json")
+	if s.w.Header().Get("X-Request-Id") == "" {
+		s.w.Header().Set("X-Request-Id", s.info.RequestID)
+	}
 	s.w.WriteHeader(http.StatusOK)
 	_, err = s.w.Write(data)
 }
@@ -580,14 +588,17 @@ func (s *retryLoopState) wrapStreamForStats(ch <-chan StreamResult) (<-chan Stre
 				if result.Event.Usage != nil {
 					mergeStreamUsage(&summary.usage, result.Event.Usage)
 				}
-				if result.Event.Response != nil {
-					// Some protocols (e.g. Anthropic message_start) carry usage
-					// inside Response.Usage rather than the top-level Usage field.
-					mergeStreamUsage(&summary.usage, &result.Event.Response.Usage)
-					if result.Event.Response.Model != "" {
-						summary.actualModel = result.Event.Response.Model
-					}
+			if result.Event.Response != nil {
+				// Some protocols (e.g. Anthropic message_start) carry usage
+				// inside Response.Usage rather than the top-level Usage field.
+				mergeStreamUsage(&summary.usage, &result.Event.Response.Usage)
+				if result.Event.Response.Model != "" {
+					summary.actualModel = result.Event.Response.Model
 				}
+				if s.h.preserveOriginalModel && s.req.OriginalModel != "" && result.Event.Type == StreamEventStart {
+					result.Event.Response.Model = s.req.OriginalModel
+				}
+			}
 				if result.Event.StopReason != nil {
 					summary.stopReason = *result.Event.StopReason
 				}
@@ -611,6 +622,9 @@ func (s *retryLoopState) handleStreaming(ch <-chan StreamResult) {
 
 	s.w.Header().Set("Content-Type", "text/event-stream")
 	s.w.Header().Set("Cache-Control", "no-cache")
+	if s.w.Header().Get("X-Request-Id") == "" {
+		s.w.Header().Set("X-Request-Id", s.info.RequestID)
+	}
 	s.w.WriteHeader(http.StatusOK)
 	s.h.codec.WriteStreamingResponse(NewSSEWriter(s.w), wrappedCh)
 

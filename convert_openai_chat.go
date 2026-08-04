@@ -943,8 +943,9 @@ func DecodeOpenAIChatResponse(body []byte) (*Response, error) {
 	}
 
 	resp := &Response{
-		ID:    raw.ID,
-		Model: raw.Model,
+		ID:      raw.ID,
+		Model:   raw.Model,
+		Created: raw.Created,
 	}
 
 	// Usage
@@ -1026,9 +1027,10 @@ func DecodeOpenAIChatResponse(body []byte) (*Response, error) {
 // EncodeOpenAIChatResponse encodes a unified IR Response into an OpenAI Chat Completions API JSON body.
 func EncodeOpenAIChatResponse(resp *Response) ([]byte, error) {
 	raw := openaichat.ChatResponse{
-		ID:     resp.ID,
-		Object: "chat.completion",
-		Model:  resp.Model,
+		ID:      resp.ID,
+		Object:  "chat.completion",
+		Model:   resp.Model,
+		Created: resp.Created,
 	}
 
 	// Build the choice message
@@ -1077,6 +1079,9 @@ func EncodeOpenAIChatResponse(resp *Response) ([]byte, error) {
 	if len(textParts) > 0 {
 		text := strings.Join(textParts, "")
 		msg.Content = &text
+	} else if len(toolCalls) > 0 || len(reasoningParts) > 0 {
+		empty := ""
+		msg.Content = &empty
 	}
 	if len(reasoningParts) > 0 {
 		reasoning := strings.Join(reasoningParts, "")
@@ -1149,8 +1154,9 @@ func DecodeOpenAIChatStreamChunks(data []byte) ([]*StreamEvent, error) {
 		return &StreamEvent{
 			Type: StreamEventStart,
 			Response: &Response{
-				ID:    raw.ID,
-				Model: raw.Model,
+				ID:      raw.ID,
+				Model:   raw.Model,
+				Created: raw.Created,
 			},
 		}
 	}
@@ -1284,6 +1290,7 @@ func EncodeOpenAIChatStreamChunk(event *StreamEvent) ([]byte, error) {
 		if event.Response != nil {
 			raw.ID = event.Response.ID
 			raw.Model = event.Response.Model
+			raw.Created = event.Response.Created
 		}
 		role := "assistant"
 		raw.Choices = []openaichat.ChatChoice{
@@ -1297,6 +1304,11 @@ func EncodeOpenAIChatStreamChunk(event *StreamEvent) ([]byte, error) {
 		}
 
 	case StreamEventDelta:
+		if event.Response != nil {
+			raw.ID = event.Response.ID
+			raw.Model = event.Response.Model
+			raw.Created = event.Response.Created
+		}
 		if event.Delta != nil {
 			switch event.Delta.Type {
 			case ContentTypeText:
@@ -1370,6 +1382,11 @@ func EncodeOpenAIChatStreamChunk(event *StreamEvent) ([]byte, error) {
 		}
 
 	case StreamEventStop:
+		if event.Response != nil {
+			raw.ID = event.Response.ID
+			raw.Model = event.Response.Model
+			raw.Created = event.Response.Created
+		}
 		finishReason := "stop"
 		if event.StopReason != nil {
 			finishReason = encodeOpenAIChatFinishReason(*event.StopReason)
@@ -1386,6 +1403,11 @@ func EncodeOpenAIChatStreamChunk(event *StreamEvent) ([]byte, error) {
 		}
 
 	case StreamEventContentBlockStart:
+		if event.Response != nil {
+			raw.ID = event.Response.ID
+			raw.Model = event.Response.Model
+			raw.Created = event.Response.Created
+		}
 		// Most block-start events carry no payload OpenAI Chat can express. A
 		// tool_use block start is the exception and must not be skipped: for
 		// Anthropic-style sources the tool's id and name arrive *only* here, with

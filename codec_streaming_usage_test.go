@@ -3,6 +3,7 @@ package llmapimux
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -719,5 +720,82 @@ func TestOpenAIChatCodec_Stream_MultipleUsageDeltas(t *testing.T) {
 	}
 	if !strings.Contains(body, `"finish_reason":"stop"`) {
 		t.Errorf("missing finish_reason 'stop':\n%s", body)
+	}
+}
+
+func TestOpenAIChatCodec_StreamError_IncludesParamField(t *testing.T) {
+	ch := make(chan StreamResult, 1)
+	ch <- StreamResult{Err: fmt.Errorf("stream broke")}
+	close(ch)
+	w := httptest.NewRecorder()
+	(&openaiChatCodec{}).WriteStreamingResponse(NewSSEWriter(w), ch)
+	body := w.Body.String()
+	if !strings.Contains(body, `"param":null`) {
+		t.Errorf("streaming error chunk missing param field:\n%s", body)
+	}
+	if !strings.Contains(body, `"type":"api_error"`) {
+		t.Errorf("streaming error chunk missing type field:\n%s", body)
+	}
+}
+
+func TestOpenAIChatCodec_Stream_ChunksIncludeCreatedField(t *testing.T) {
+	endTurn := StopReasonEndTurn
+	events := []StreamResult{
+		{Event: &StreamEvent{
+			Type: StreamEventStart,
+			Response: &Response{
+				ID:      "chatcmpl-created",
+				Model:   "gpt-4o",
+				Created: 1700000000,
+			},
+		}},
+		{Event: &StreamEvent{
+			Type:  StreamEventDelta,
+			Index: 0,
+			Delta: &ContentPart{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}},
+		}},
+		{Event: &StreamEvent{
+			Type:       StreamEventStop,
+			StopReason: &endTurn,
+			Usage:      &Usage{PromptTokens: 5, CompletionTokens: 1},
+		}},
+	}
+
+	body := sendStreamToCodec(&openaiChatCodec{}, events)
+
+	chunks := strings.Count(body, `"created":`)
+	if chunks < 2 {
+		t.Errorf("created field appears %d times, want at least 2:\n%s", chunks, body)
+	}
+	if !strings.Contains(body, `"created":1700000000`) {
+		t.Errorf("created timestamp not propagated correctly:\n%s", body)
+	}
+}
+
+func TestOpenAIChatCodec_Stream_ChunksIncludeIDAndModel(t *testing.T) {
+	events := []StreamResult{
+		{Event: &StreamEvent{
+			Type: StreamEventStart,
+			Response: &Response{
+				ID:    "chatcmpl-id-test",
+				Model: "gpt-4o",
+			},
+		}},
+		{Event: &StreamEvent{
+			Type:  StreamEventDelta,
+			Index: 0,
+			Delta: &ContentPart{Type: ContentTypeText, Text: &TextContent{Text: "Hi"}},
+		}},
+	}
+
+	body := sendStreamToCodec(&openaiChatCodec{}, events)
+
+	deltaLines := strings.Count(body, `"id":"chatcmpl-id-test"`)
+	if deltaLines < 2 {
+		t.Errorf("id field appears %d times, want at least 2 (start + delta):\n%s", deltaLines, body)
+	}
+	deltaModel := strings.Count(body, `"model":"gpt-4o"`)
+	if deltaModel < 2 {
+		t.Errorf("model field appears %d times, want at least 2:\n%s", deltaModel, body)
 	}
 }

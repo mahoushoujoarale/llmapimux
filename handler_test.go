@@ -1847,3 +1847,156 @@ func TestHandler_OutboundExtra_NilModifier(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
 }
+
+func TestHandler_NonStreaming_SetsXRequestIdHeader(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+
+	h := &Handler{
+		codec:  &openaiChatCodec{},
+		router: &staticRouter{result: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: upstream.URL, APIKey: "sk-test", Model: "gpt-4o"}},
+	}
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	reqID := w.Header().Get("X-Request-Id")
+	if reqID == "" {
+		t.Fatal("X-Request-Id header is missing")
+	}
+	if len(strings.Split(reqID, "-")) != 5 {
+		t.Errorf("X-Request-Id = %q, want UUID format", reqID)
+	}
+}
+
+func TestHandler_Streaming_SetsXRequestIdHeader(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1,\"total_tokens\":6}}\n\ndata: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	h := &Handler{
+		codec:  &openaiChatCodec{},
+		router: &staticRouter{result: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: upstream.URL, APIKey: "sk-test", Model: "gpt-4o"}},
+	}
+	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	reqID := w.Header().Get("X-Request-Id")
+	if reqID == "" {
+		t.Fatal("X-Request-Id header is missing in streaming response")
+	}
+}
+
+func TestHandler_XRequestId_PreSetValueNotOverwritten(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+
+	h := &Handler{
+		codec:  &openaiChatCodec{},
+		router: &staticRouter{result: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: upstream.URL, APIKey: "sk-test", Model: "gpt-4o"}},
+	}
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	w.Header().Set("X-Request-Id", "caller-id-123")
+	h.ServeHTTP(w, r)
+
+	if w.Header().Get("X-Request-Id") != "caller-id-123" {
+		t.Errorf("X-Request-Id = %q, want caller-id-123 (pre-set value should not be overwritten)", w.Header().Get("X-Request-Id"))
+	}
+}
+
+func TestHandler_RawExtra_StreamOptions_SameProtocolPreserved(t *testing.T) {
+	var upstreamReq map[string]json.RawMessage
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&upstreamReq)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	h := &Handler{
+		codec:  &openaiChatCodec{},
+		router: &staticRouter{result: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: upstream.URL, APIKey: "sk-test", Model: "gpt-4o"}},
+	}
+	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}],"stream_options":{"include_usage":true}}`
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	so := string(upstreamReq["stream_options"])
+	if !strings.Contains(so, "include_usage") {
+		t.Errorf("upstream stream_options = %s, want include_usage to be preserved on same-protocol passthrough", so)
+	}
+}
+
+func TestHandler_PreserveOriginalModel_NonStreaming(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-1","model":"gpt-4o-mini-routed","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+
+	mux := NewMux(
+		&staticRouter{result: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: upstream.URL, APIKey: "sk-test", Model: "gpt-4o-mini-routed"}},
+		WithPreserveOriginalModel(true),
+	)
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	mux.OpenAIChatHandler().ServeHTTP(w, r)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["model"] != "gpt-4o" {
+		t.Errorf("model = %v, want gpt-4o (original)", resp["model"])
+	}
+}
+
+func TestHandler_PreserveOriginalModel_Disabled(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"chatcmpl-1","model":"gpt-4o-mini-routed","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+
+	mux := NewMux(
+		&staticRouter{result: RouteResult{Protocol: ProtocolOpenAIChat, BaseURL: upstream.URL, APIKey: "sk-test", Model: "gpt-4o-mini-routed"}},
+	)
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	mux.OpenAIChatHandler().ServeHTTP(w, r)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["model"] != "gpt-4o-mini-routed" {
+		t.Errorf("model = %v, want gpt-4o-mini-routed (upstream model when preserveOriginalModel is disabled)", resp["model"])
+	}
+}

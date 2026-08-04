@@ -48,6 +48,7 @@ var openaiChatUnmappedFields = []string{
 	"service_tier", "store", "user", "seed", "logit_bias", "logprobs",
 	"top_logprobs", "n", "frequency_penalty", "presence_penalty", "prediction",
 	"modalities", "audio", "web_search_options", "prompt_cache_key", "safety_identifier",
+	"stream_options",
 }
 
 // openaiResponsesUnmappedFields are OpenAI Responses request fields with no IR

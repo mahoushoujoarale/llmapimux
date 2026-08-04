@@ -1,8 +1,10 @@
 package llmapimux
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -277,5 +279,104 @@ func TestCodecWriteError(t *testing.T) {
 				t.Errorf("Content-Type = %s", w.Header().Get("Content-Type"))
 			}
 		})
+	}
+}
+
+func TestCodecWriteError_IncludesParamField(t *testing.T) {
+	tests := []struct {
+		name      string
+		codec     inboundCodec
+		wantParam bool
+	}{
+		{"openai_chat", &openaiChatCodec{}, true},
+		{"openai_responses", &openaiResponsesCodec{}, true},
+		{"anthropic", &anthropicCodec{}, false},
+		{"gemini", &geminiCodec{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			tt.codec.WriteError(w, http.StatusBadRequest, "test error")
+			body := w.Body.String()
+			if tt.wantParam {
+				if !strings.Contains(body, `"param":null`) {
+					t.Errorf("body missing param:null: %s", body)
+				}
+				if !strings.Contains(body, `"type":"invalid_request_error"`) {
+					t.Errorf("body missing type field: %s", body)
+				}
+			} else {
+				if strings.Contains(body, `"param"`) {
+					t.Errorf("body should not contain param field: %s", body)
+				}
+			}
+		})
+	}
+}
+
+func TestOpenAIChatCodec_EncodeResponse_EmptyContentWithToolCalls(t *testing.T) {
+	resp := &Response{
+		ID:   "chatcmpl-empty",
+		Model: "gpt-4o",
+		Content: []ContentPart{
+			{Type: ContentTypeToolUse, ToolUse: &ToolUseContent{ID: "call_1", Name: "get_weather", Arguments: json.RawMessage(`{"city":"Paris"}`)}},
+		},
+		StopReason: StopReasonToolUse,
+		Usage:      Usage{PromptTokens: 10, CompletionTokens: 5},
+	}
+
+	data, err := (&openaiChatCodec{}).EncodeResponse(resp)
+	if err != nil {
+		t.Fatalf("EncodeResponse error: %v", err)
+	}
+	if !strings.Contains(string(data), `"content":""`) {
+		t.Errorf("content should be empty string when only tool_calls present, got:\n%s", string(data))
+	}
+}
+
+func TestOpenAIChatCodec_EncodeResponse_NoContentNoToolCalls_OmitsContent(t *testing.T) {
+	resp := &Response{
+		ID:         "chatcmpl-none",
+		Model:      "gpt-4o",
+		StopReason: StopReasonEndTurn,
+		Usage:      Usage{PromptTokens: 10, CompletionTokens: 0},
+	}
+
+	data, err := (&openaiChatCodec{}).EncodeResponse(resp)
+	if err != nil {
+		t.Fatalf("EncodeResponse error: %v", err)
+	}
+	if strings.Contains(string(data), `"content"`) {
+		t.Errorf("content should be omitted when no text/tool_calls/reasoning, got:\n%s", string(data))
+	}
+}
+
+func TestOpenAIChatCodec_DecodeResponse_PreservesCreated(t *testing.T) {
+	body := `{"id":"chatcmpl-1","model":"gpt-4o","created":1700000000,"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`
+	resp, err := DecodeOpenAIChatResponse([]byte(body))
+	if err != nil {
+		t.Fatalf("DecodeOpenAIChatResponse error: %v", err)
+	}
+	if resp.Created != 1700000000 {
+		t.Errorf("Created = %d, want 1700000000", resp.Created)
+	}
+}
+
+func TestOpenAIChatCodec_EncodeResponse_PreservesCreated(t *testing.T) {
+	resp := &Response{
+		ID:      "chatcmpl-1",
+		Model:   "gpt-4o",
+		Created: 1700000000,
+		Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "ok"}}},
+		StopReason: StopReasonEndTurn,
+		Usage:      Usage{PromptTokens: 5, CompletionTokens: 1},
+	}
+
+	data, err := (&openaiChatCodec{}).EncodeResponse(resp)
+	if err != nil {
+		t.Fatalf("EncodeResponse error: %v", err)
+	}
+	if !strings.Contains(string(data), `"created":1700000000`) {
+		t.Errorf("response missing created field, got:\n%s", string(data))
 	}
 }

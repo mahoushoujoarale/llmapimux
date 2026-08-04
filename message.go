@@ -250,6 +250,7 @@ type Request struct {
 type Response struct {
 	ID                 string             `json:"id,omitempty"`
 	Model              string             `json:"model,omitempty"`
+	Created            int64              `json:"created,omitempty"`
 	Content            []ContentPart      `json:"content,omitempty"`
 	StopReason         StopReason         `json:"stop_reason,omitempty"`
 	StopSequence       string             `json:"stop_sequence,omitempty"`
