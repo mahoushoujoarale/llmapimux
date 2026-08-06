@@ -57,6 +57,17 @@ func TestHasMediaContent(t *testing.T) {
 		t.Error("request with document should have media")
 	}
 
+	withVideo := &Request{
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{
+				{Type: ContentTypeVideo, Video: &VideoContent{URL: "https://example.com/clip.mp4"}},
+			}},
+		},
+	}
+	if !hasMediaContent(withVideo) {
+		t.Error("request with video should have media")
+	}
+
 	withSystemImage := &Request{
 		SystemPrompt: []ContentPart{
 			{Type: ContentTypeImage, Image: &ImageContent{URL: "https://example.com/img.png"}},

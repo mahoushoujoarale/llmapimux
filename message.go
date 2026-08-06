@@ -49,6 +49,7 @@ const (
 	ContentTypeToolResult          ContentType = "tool_result"
 	ContentTypeServerToolUse       ContentType = "server_tool_use"
 	ContentTypeWebSearchToolResult ContentType = "web_search_tool_result"
+	ContentTypeVideo              ContentType = "video"
 	ContentTypeDocument            ContentType = "document"
 	ContentTypeThinking            ContentType = "thinking"
 	ContentTypeRedactedThinking    ContentType = "redacted_thinking"
@@ -89,6 +90,7 @@ type ContentPart struct {
 	ToolResult          *ToolResultContent          `json:"tool_result,omitempty"`
 	ServerToolUse       *ServerToolUseContent       `json:"server_tool_use,omitempty"`
 	WebSearchToolResult *WebSearchToolResultContent `json:"web_search_tool_result,omitempty"`
+	Video               *VideoContent                `json:"video,omitempty"`
 	Document            *DocumentContent            `json:"document,omitempty"`
 	Thinking            *ThinkingContent            `json:"thinking,omitempty"`
 	RedactedThinking    *RedactedThinkingContent    `json:"redacted_thinking,omitempty"`
@@ -111,6 +113,13 @@ type ImageContent struct {
 	URL       string `json:"url,omitempty"`
 	MediaType string `json:"media_type,omitempty"`
 	Detail    string `json:"detail,omitempty"`
+}
+
+// VideoContent holds video data or a URL reference.
+type VideoContent struct {
+	Data      []byte `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
+	MediaType string `json:"media_type,omitempty"`
 }
 
 // DocumentContent holds document data or a URL reference.

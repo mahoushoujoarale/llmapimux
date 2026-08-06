@@ -55,12 +55,18 @@ type ChatContentPart struct {
 	Type     string        `json:"type"`
 	Text     string        `json:"text,omitempty"`
 	ImageURL *ChatImageURL `json:"image_url,omitempty"`
+	VideoURL *ChatVideoURL `json:"video_url,omitempty"`
 }
 
 // ChatImageURL represents an image_url content part.
 type ChatImageURL struct {
 	URL    string `json:"url"`
 	Detail string `json:"detail,omitempty"`
+}
+
+// ChatVideoURL represents a video_url content part.
+type ChatVideoURL struct {
+	URL string `json:"url"`
 }
 
 // ToolCall represents a tool call in the OpenAI Chat API.

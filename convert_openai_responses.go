@@ -504,6 +504,26 @@ func decodeOaiRespMessageContent(raw json.RawMessage) ([]ContentPart, error) {
 				Type:     ContentTypeDocument,
 				Document: doc,
 			})
+		case "input_video":
+			vid := &VideoContent{}
+			if p.VideoURL != "" {
+				if strings.HasPrefix(p.VideoURL, "data:") {
+					mediaType, b64Data, err := parseDataURI(p.VideoURL)
+					if err == nil {
+						if data, decErr := base64.StdEncoding.DecodeString(b64Data); decErr == nil {
+							vid.Data = data
+							vid.MediaType = mediaType
+						}
+					}
+				}
+				if len(vid.Data) == 0 {
+					vid.URL = p.VideoURL
+				}
+			}
+			result = append(result, ContentPart{
+				Type:  ContentTypeVideo,
+				Video: vid,
+			})
 		default:
 			// Unknown content type — pass through
 			result = append(result, ContentPart{Type: ContentType(p.Type)})
@@ -820,6 +840,20 @@ func encodeOaiRespContentParts(parts []ContentPart, textType string) []openaires
 				}
 				if p.Document.Title != "" {
 					cp.Filename = p.Document.Title
+				}
+				result = append(result, cp)
+			}
+		case ContentTypeVideo:
+			if p.Video != nil {
+				cp := openairesponses.ContentPart{Type: "input_video"}
+				if p.Video.URL != "" {
+					cp.VideoURL = p.Video.URL
+				} else if len(p.Video.Data) > 0 {
+					mediaType := p.Video.MediaType
+					if mediaType == "" {
+						mediaType = "application/octet-stream"
+					}
+					cp.VideoURL = "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(p.Video.Data)
 				}
 				result = append(result, cp)
 			}

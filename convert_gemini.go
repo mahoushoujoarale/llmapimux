@@ -719,6 +719,15 @@ func convertGeminiPartToIR(p gemini.Part) (ContentPart, error) {
 				},
 			}, nil
 		}
+		if strings.HasPrefix(p.InlineData.MimeType, "video/") {
+			return ContentPart{
+				Type: ContentTypeVideo,
+				Video: &VideoContent{
+					Data:      data,
+					MediaType: p.InlineData.MimeType,
+				},
+			}, nil
+		}
 		return ContentPart{
 			Type: ContentTypeImage,
 			Image: &ImageContent{
@@ -732,6 +741,15 @@ func convertGeminiPartToIR(p gemini.Part) (ContentPart, error) {
 			return ContentPart{
 				Type: ContentTypeDocument,
 				Document: &DocumentContent{
+					URL:       p.FileData.FileURI,
+					MediaType: p.FileData.MimeType,
+				},
+			}, nil
+		}
+		if strings.HasPrefix(p.FileData.MimeType, "video/") {
+			return ContentPart{
+				Type: ContentTypeVideo,
+				Video: &VideoContent{
 					URL:       p.FileData.FileURI,
 					MediaType: p.FileData.MimeType,
 				},
@@ -1145,6 +1163,27 @@ func convertIRPartToGemini(p ContentPart) gemini.Part {
 					FileData: &gemini.FileData{
 						MimeType: p.Document.MediaType,
 						FileURI:  p.Document.URL,
+					},
+				}
+			}
+		}
+		return gemini.Part{}
+
+	case ContentTypeVideo:
+		if p.Video != nil {
+			if len(p.Video.Data) > 0 {
+				return gemini.Part{
+					InlineData: &gemini.InlineData{
+						MimeType: p.Video.MediaType,
+						Data:     base64.StdEncoding.EncodeToString(p.Video.Data),
+					},
+				}
+			}
+			if p.Video.URL != "" {
+				return gemini.Part{
+					FileData: &gemini.FileData{
+						MimeType: p.Video.MediaType,
+						FileURI:  p.Video.URL,
 					},
 				}
 			}

@@ -248,6 +248,75 @@ func TestDecodeOpenAIChatRequest_ImageURL(t *testing.T) {
 	}
 }
 
+func TestDecodeOpenAIChatRequest_Video(t *testing.T) {
+	videoData := []byte{0x00, 0x00, 0x00, 0x18} // MP4 header bytes
+	b64 := base64.StdEncoding.EncodeToString(videoData)
+	body := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "Describe this video"},
+				{"type": "video_url", "video_url": {"url": "data:video/mp4;base64,` + b64 + `"}}
+			]
+		}]
+	}`)
+
+	req, err := DecodeOpenAIChatRequest(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(req.Messages) != 1 {
+		t.Fatalf("Messages len = %d, want 1", len(req.Messages))
+	}
+	content := req.Messages[0].Content
+	if len(content) != 2 {
+		t.Fatalf("Content len = %d, want 2", len(content))
+	}
+	if content[0].Type != ContentTypeText || content[0].Text.Text != "Describe this video" {
+		t.Errorf("Content[0] = %+v, want text 'Describe this video'", content[0])
+	}
+	if content[1].Type != ContentTypeVideo {
+		t.Fatalf("Content[1].Type = %q, want %q", content[1].Type, ContentTypeVideo)
+	}
+	vid := content[1].Video
+	if vid == nil {
+		t.Fatal("Video is nil")
+	}
+	if vid.MediaType != "video/mp4" {
+		t.Errorf("Video.MediaType = %q, want %q", vid.MediaType, "video/mp4")
+	}
+	if len(vid.Data) != len(videoData) {
+		t.Errorf("Video.Data len = %d, want %d", len(vid.Data), len(videoData))
+	}
+}
+
+func TestDecodeOpenAIChatRequest_VideoURL(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}}
+			]
+		}]
+	}`)
+
+	req, err := DecodeOpenAIChatRequest(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	vid := req.Messages[0].Content[0].Video
+	if vid.URL != "https://example.com/clip.mp4" {
+		t.Errorf("Video.URL = %q, want %q", vid.URL, "https://example.com/clip.mp4")
+	}
+	if len(vid.Data) != 0 {
+		t.Errorf("Video.Data should be empty for URL videos, got %d bytes", len(vid.Data))
+	}
+}
+
 func TestDecodeOpenAIChatRequest_ToolCalls(t *testing.T) {
 	body := []byte(`{
 		"model": "gpt-4o",

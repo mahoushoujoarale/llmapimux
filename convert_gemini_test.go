@@ -379,6 +379,72 @@ func TestDecodeGeminiRequest_PDFFileData(t *testing.T) {
 	}
 }
 
+func TestDecodeGeminiRequest_VideoInlineData(t *testing.T) {
+	videoData := base64.StdEncoding.EncodeToString([]byte("fake-mp4-data"))
+	body := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [
+				{"inlineData": {"mimeType": "video/mp4", "data": "` + videoData + `"}},
+				{"text": "Describe this video"}
+			]}
+		]
+	}`)
+
+	req, err := DecodeGeminiRequest("/v1/models/gemini-2.5-pro:generateContent", body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msg := req.Messages[0]
+	if len(msg.Content) != 2 {
+		t.Fatalf("Content len = %d, want 2", len(msg.Content))
+	}
+
+	vid := msg.Content[0]
+	if vid.Type != ContentTypeVideo {
+		t.Errorf("Content[0].Type = %q, want %q", vid.Type, ContentTypeVideo)
+	}
+	if vid.Video == nil {
+		t.Fatal("Content[0].Video is nil")
+	}
+	if vid.Video.MediaType != "video/mp4" {
+		t.Errorf("Video.MediaType = %q, want %q", vid.Video.MediaType, "video/mp4")
+	}
+	if string(vid.Video.Data) != "fake-mp4-data" {
+		t.Errorf("Video.Data = %q, want %q", string(vid.Video.Data), "fake-mp4-data")
+	}
+
+	if msg.Content[1].Type != ContentTypeText || msg.Content[1].Text.Text != "Describe this video" {
+		t.Errorf("Content[1] = %+v, want text 'Describe this video'", msg.Content[1])
+	}
+}
+
+func TestDecodeGeminiRequest_VideoFileData(t *testing.T) {
+	body := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [
+				{"fileData": {"mimeType": "video/webm", "fileUri": "gs://bucket/clip.webm"}}
+			]}
+		]
+	}`)
+
+	req, err := DecodeGeminiRequest("/v1/models/gemini-2.5-pro:generateContent", body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	vid := req.Messages[0].Content[0]
+	if vid.Type != ContentTypeVideo {
+		t.Errorf("Type = %q, want %q", vid.Type, ContentTypeVideo)
+	}
+	if vid.Video.URL != "gs://bucket/clip.webm" {
+		t.Errorf("Video.URL = %q, want %q", vid.Video.URL, "gs://bucket/clip.webm")
+	}
+	if vid.Video.MediaType != "video/webm" {
+		t.Errorf("Video.MediaType = %q, want %q", vid.Video.MediaType, "video/webm")
+	}
+}
+
 func TestDecodeGeminiRequest_Tools(t *testing.T) {
 	body := []byte(`{
 		"contents": [{"role": "user", "parts": [{"text": "Hello"}]}],

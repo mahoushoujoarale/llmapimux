@@ -134,13 +134,13 @@ func toolResultTextWithError(result *ToolResultContent) string {
 // hasMediaContent returns true if any message or system prompt contains image or document parts.
 func hasMediaContent(req *Request) bool {
 	for _, part := range req.SystemPrompt {
-		if part.Type == ContentTypeImage || part.Type == ContentTypeDocument {
+		if part.Type == ContentTypeImage || part.Type == ContentTypeDocument || part.Type == ContentTypeVideo {
 			return true
 		}
 	}
 	for _, msg := range req.Messages {
 		for _, part := range msg.Content {
-			if part.Type == ContentTypeImage || part.Type == ContentTypeDocument {
+			if part.Type == ContentTypeImage || part.Type == ContentTypeDocument || part.Type == ContentTypeVideo {
 				return true
 			}
 		}

@@ -165,6 +165,7 @@ type ContentPart struct {
 	Text     string `json:"text,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
 	Detail   string `json:"detail,omitempty"`
+	VideoURL string `json:"video_url,omitempty"`
 	FileID   string `json:"file_id,omitempty"`
 	FileData string `json:"file_data,omitempty"`
 	FileURL  string `json:"file_url,omitempty"`

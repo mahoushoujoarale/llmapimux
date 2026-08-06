@@ -358,6 +358,18 @@ func decodeOpenAIChatMessageContent(raw json.RawMessage) ([]ContentPart, error) 
 				Type:  ContentTypeImage,
 				Image: img,
 			})
+		case "video_url":
+			if p.VideoURL == nil {
+				continue
+			}
+			vid, err := decodeOpenAIChatVideoURL(p.VideoURL)
+			if err != nil {
+				return nil, fmt.Errorf("decode video_url: %w", err)
+			}
+			result = append(result, ContentPart{
+				Type:  ContentTypeVideo,
+				Video: vid,
+			})
 		default:
 			// Unknown type — pass through as-is
 			result = append(result, ContentPart{Type: ContentType(p.Type)})
@@ -399,6 +411,27 @@ func decodeOpenAIChatImageURL(img *openaichat.ChatImageURL) (*ImageContent, erro
 	return &ImageContent{
 		URL:    img.URL,
 		Detail: img.Detail,
+	}, nil
+}
+
+// decodeOpenAIChatVideoURL decodes a video_url content part into an IR VideoContent.
+func decodeOpenAIChatVideoURL(vid *openaichat.ChatVideoURL) (*VideoContent, error) {
+	if strings.HasPrefix(vid.URL, "data:") {
+		mediaType, b64Data, err := parseDataURI(vid.URL)
+		if err != nil {
+			return nil, err
+		}
+		data, err := base64.StdEncoding.DecodeString(b64Data)
+		if err != nil {
+			return nil, fmt.Errorf("decode base64 video data: %w", err)
+		}
+		return &VideoContent{
+			Data:      data,
+			MediaType: mediaType,
+		}, nil
+	}
+	return &VideoContent{
+		URL: vid.URL,
 	}, nil
 }
 
@@ -817,6 +850,25 @@ func encodeOpenAIChatContentParts(parts []ContentPart) []openaichat.ChatContentP
 				}
 				result = append(result, cp)
 			}
+		case ContentTypeVideo:
+			if p.Video != nil {
+				cp := openaichat.ChatContentPart{
+					Type: "video_url",
+					VideoURL: &openaichat.ChatVideoURL{},
+				}
+				if len(p.Video.Data) > 0 {
+					mediaType := p.Video.MediaType
+					if mediaType == "" {
+						mediaType = "application/octet-stream"
+					}
+					cp.VideoURL.URL = fmt.Sprintf("data:%s;base64,%s",
+						mediaType,
+						base64.StdEncoding.EncodeToString(p.Video.Data))
+				} else if p.Video.URL != "" {
+					cp.VideoURL.URL = p.Video.URL
+				}
+				result = append(result, cp)
+			}
 		case ContentTypeDocument:
 			// OpenAI Chat Completions has no document/file content part.
 			if text := documentPlaceholderText(p.Document); text != "" {
@@ -853,11 +905,25 @@ func documentPlaceholderText(doc *DocumentContent) string {
 	}
 }
 
+// videoPlaceholderText renders a video part as text for protocols with no
+// video content type.
+func videoPlaceholderText(vid *VideoContent) string {
+	if vid == nil {
+		return "[video omitted]"
+	}
+	if vid.URL != "" {
+		return fmt.Sprintf("[video: %s]", vid.URL)
+	}
+	return "[video omitted: not supported by this provider]"
+}
+
 // unrepresentablePlaceholderText renders content parts that have no equivalent in
 // the target protocol as a short text note, so the message never encodes to an
 // empty content array and the model is told something was dropped.
 func unrepresentablePlaceholderText(p ContentPart) string {
 	switch p.Type {
+	case ContentTypeVideo:
+		return videoPlaceholderText(p.Video)
 	case ContentTypeRefusal:
 		if p.Refusal != nil {
 			return p.Refusal.Refusal

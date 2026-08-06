@@ -830,6 +830,13 @@ func encodeAnthropicContentPart(p ContentPart) (anthropic.ContentBlock, error) {
 		}
 		return b, nil
 
+	case ContentTypeVideo:
+		// Anthropic has no native video content block type.
+		// Downgrade to text placeholder so the model is aware content was present.
+		b := anthropic.ContentBlock{Type: "text"}
+		b.Text = videoPlaceholderText(p.Video)
+		return b, nil
+
 	default:
 		return anthropic.ContentBlock{Type: string(p.Type)}, nil
 	}
