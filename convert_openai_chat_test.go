@@ -649,6 +649,167 @@ func TestEncodeOpenAIChatRequest_Basic(t *testing.T) {
 	}
 }
 
+func TestEncodeOpenAIChatRequest_MapDeveloperToSystem(t *testing.T) {
+	// When MapDeveloperToSystem is true, SystemPrompt should be emitted as
+	// "system" role instead of "developer". This is needed for downstream
+	// providers (e.g. vLLM) that don't support the "developer" role.
+	req := &Request{
+		Model: "vllm-model",
+		SystemPrompt: []ContentPart{
+			{Type: ContentTypeText, Text: &TextContent{Text: "You are helpful."}},
+		},
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}}}},
+		},
+		MapDeveloperToSystem: true,
+	}
+
+	data, err := EncodeOpenAIChatRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	msgs := raw["messages"].([]interface{})
+	if len(msgs) != 2 {
+		t.Fatalf("messages len = %d, want 2", len(msgs))
+	}
+	sysMsg := msgs[0].(map[string]interface{})
+	if sysMsg["role"] != "system" {
+		t.Errorf("messages[0].role = %v, want system (MapDeveloperToSystem=true)", sysMsg["role"])
+	}
+}
+
+func TestEncodeOpenAIChatRequest_DefaultDeveloperRole(t *testing.T) {
+	// When MapDeveloperToSystem is false (default), SystemPrompt should be
+	// emitted as "developer" role — the standard OpenAI Chat behavior.
+	req := &Request{
+		Model: "gpt-4o",
+		SystemPrompt: []ContentPart{
+			{Type: ContentTypeText, Text: &TextContent{Text: "Be helpful."}},
+		},
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hi"}}}},
+		},
+		MapDeveloperToSystem: false,
+	}
+
+	data, err := EncodeOpenAIChatRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	msgs := raw["messages"].([]interface{})
+	if len(msgs) != 2 {
+		t.Fatalf("messages len = %d, want 2", len(msgs))
+	}
+	devMsg := msgs[0].(map[string]interface{})
+	if devMsg["role"] != "developer" {
+		t.Errorf("messages[0].role = %v, want developer (default)", devMsg["role"])
+	}
+}
+
+func TestEncodeOpenAIChatRequest_ConsolidatedSystemPrompt(t *testing.T) {
+	// When the IR SystemPrompt contains content from multiple original
+	// system/developer messages (e.g. "Be helpful" + "Be concise"), the
+	// IR consolidation means they are emitted as a single message at
+	// position 0. With MapDeveloperToSystem=true, this single message
+	// uses "system" role — matching vLLM's _consolidate_system_messages.
+	req := &Request{
+		Model: "vllm-model",
+		SystemPrompt: []ContentPart{
+			{Type: ContentTypeText, Text: &TextContent{Text: "Be helpful."}},
+			{Type: ContentTypeText, Text: &TextContent{Text: "Be concise."}},
+		},
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}}}},
+		},
+		MapDeveloperToSystem: true,
+	}
+
+	data, err := EncodeOpenAIChatRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	msgs := raw["messages"].([]interface{})
+	if len(msgs) != 2 {
+		t.Fatalf("messages len = %d, want 2 (consolidated into single system message)", len(msgs))
+	}
+	sysMsg := msgs[0].(map[string]interface{})
+	if sysMsg["role"] != "system" {
+		t.Errorf("messages[0].role = %v, want system", sysMsg["role"])
+	}
+
+	// The consolidated content should contain both parts
+	contentRaw, ok := sysMsg["content"]
+	if !ok {
+		t.Fatal("messages[0].content is missing")
+	}
+	var contentParts []map[string]interface{}
+	switch v := contentRaw.(type) {
+	case []interface{}:
+		for _, item := range v {
+			contentParts = append(contentParts, item.(map[string]interface{}))
+		}
+	default:
+		t.Fatalf("messages[0].content type = %T, want array", contentRaw)
+	}
+	if len(contentParts) != 2 {
+		t.Fatalf("content parts len = %d, want 2", len(contentParts))
+	}
+	if contentParts[0]["text"] != "Be helpful." {
+		t.Errorf("content[0].text = %v, want 'Be helpful.'", contentParts[0]["text"])
+	}
+	if contentParts[1]["text"] != "Be concise." {
+		t.Errorf("content[1].text = %v, want 'Be concise.'", contentParts[1]["text"])
+	}
+}
+
+func TestEncodeOpenAIChatRequest_NoSystemPromptNoDeveloperMessage(t *testing.T) {
+	// When SystemPrompt is empty and MapDeveloperToSystem is true,
+	// no developer/system message should be emitted at all.
+	req := &Request{
+		Model: "vllm-model",
+		Messages: []Message{
+			{Role: RoleUser, Content: []ContentPart{{Type: ContentTypeText, Text: &TextContent{Text: "Hello"}}}},
+		},
+		MapDeveloperToSystem: true,
+	}
+
+	data, err := EncodeOpenAIChatRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	msgs := raw["messages"].([]interface{})
+	if len(msgs) != 1 {
+		t.Fatalf("messages len = %d, want 1 (only user message)", len(msgs))
+	}
+	if msgs[0].(map[string]interface{})["role"] != "user" {
+		t.Errorf("messages[0].role = %v, want user", msgs[0].(map[string]interface{})["role"])
+	}
+}
+
 func TestEncodeOpenAIChatRequest_ToolChoice(t *testing.T) {
 	// Named tool_choice must be accompanied by a matching tool in req.Tools,
 	// otherwise the sanitizer degrades it to "auto" to avoid the upstream

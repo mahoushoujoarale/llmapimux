@@ -253,6 +253,23 @@ type Request struct {
 	// Set by RequestModifier before each send attempt.
 	OutboundExtra   map[string]json.RawMessage `json:"-"`
 	InboundProtocol Protocol                   `json:"-"`
+
+	// MapDeveloperToSystem controls whether the gateway maps the "developer"
+	// role to "system" in outbound OpenAI Chat Completions requests.
+	//
+	// Many downstream OpenAI-compatible providers (e.g. vLLM, some
+	// OpenAI-compatible servers) don't support the "developer" message role
+	// and will reject requests containing it with a 400 error. When true,
+	// SystemPrompt is emitted as a "system" role message instead of
+	// "developer". The IR already consolidates all system and developer
+	// content into SystemPrompt (equivalent to vLLM's
+	// _consolidate_system_messages), so the output is always a single system
+	// message at position 0 regardless of how many system/developer messages
+	// appeared in the original request.
+	//
+	// This field is set by the Handler from the Mux option and is not
+	// serialized on the wire.
+	MapDeveloperToSystem bool `json:"-"`
 }
 
 // Response is the unified intermediate representation of an LLM API response.

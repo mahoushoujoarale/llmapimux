@@ -41,6 +41,7 @@ cd tests/e2e && go test -run TestRealAPI ./...  # Run only real API tests
 - Built-in `CircuitBreakerRouter`: per-target circuit breaker (Closed→Open→HalfOpen→Closed) with configurable thresholds, `CandidateFunc` for target selection, and lazy attempt tracking cleanup
 - Context propagation: client disconnect cancels upstream request and retry loop
 - `RequestModifier` hook: called per-attempt in the retry loop (after model assignment, before send), allows callers to set `Request.OutboundExtra` which gets merged into the outbound JSON body. Reset to `nil` before each attempt to prevent cross-target leakage. Registered via `WithRequestModifier` MuxOption.
+- Developer-to-system role mapping: `WithMapDeveloperToSystem` MuxOption causes outbound OpenAI Chat Completions requests to emit SystemPrompt as `"system"` role instead of `"developer"`. The IR already consolidates all system and developer content into `Request.SystemPrompt` (equivalent to vLLM's `_consolidate_system_messages`), so the output is always a single system message at position 0 regardless of how many system/developer messages appeared in the original request. Needed for downstream providers (e.g. vLLM) that don't support the `"developer"` role.
 
 ## Testing Notes
 
@@ -69,7 +70,7 @@ cd tests/e2e && go test -run TestRealAPI ./...  # Run only real API tests
 
 - **Gemini**: model is in URL path (not body); no native "tool" role; no explicit `tool_use` finish reason (infer from FunctionCall parts); streaming uses `streamGenerateContent?alt=sse`; ResponseFormat requires JSON Schema → Gemini Schema conversion
 - **Anthropic**: `redacted_thinking` must round-trip exactly; `pause_turn` stop reason has no equivalent in other protocols (maps to `end_turn`)
-- **OpenAI Chat**: both `system` and `developer` roles → IR SystemPrompt; outbound emits `developer` role; reads both `max_tokens` and `max_completion_tokens`
+- **OpenAI Chat**: both `system` and `developer` roles → IR SystemPrompt; outbound emits `developer` role by default; `WithMapDeveloperToSystem` option emits `system` role instead (needed for downstream providers like vLLM that don't support the `developer` role); reads both `max_tokens` and `max_completion_tokens`
 - **OpenAI Responses**: stateless proxy (no `previous_response_id` support); built-in tools silently dropped
 - **Auth headers**: OpenAI `Authorization: Bearer`, Anthropic `x-api-key` or `Authorization: Bearer` (inbound, x-api-key preferred) / `x-api-key` + `anthropic-version` (outbound), Gemini `x-goog-api-key` or `?key=`
 - **Anthropic streaming**: cross-protocol IR streams omit `content_block_start`/`content_block_stop` lifecycle events; `inbound_anthropic.go:handleStreaming` injects them synthetically — required for the Anthropic SDK accumulator's `AsAny()` to return populated text

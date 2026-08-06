@@ -528,15 +528,25 @@ func EncodeOpenAIChatRequest(req *Request) ([]byte, error) {
 		raw.Stop = data
 	}
 
-	// System prompt → developer role message
+	// System prompt → developer or system role message
+	// When MapDeveloperToSystem is true, emit as "system" role instead of
+	// "developer". Many downstream OpenAI-compatible providers (e.g. vLLM)
+	// don't support the "developer" role and reject it with a 400.
+	// The IR already consolidates all system and developer content into
+	// SystemPrompt (equivalent to vLLM's _consolidate_system_messages),
+	// so the output is always a single system message at position 0.
 	if len(req.SystemPrompt) > 0 {
 		content := encodeOpenAIChatContentParts(req.SystemPrompt)
 		contentJSON, err := json.Marshal(content)
 		if err != nil {
 			return nil, fmt.Errorf("encode openai chat request system: %w", err)
 		}
+		role := "developer"
+		if req.MapDeveloperToSystem {
+			role = "system"
+		}
 		raw.Messages = append(raw.Messages, openaichat.ChatMessage{
-			Role:    "developer",
+			Role:    role,
 			Content: contentJSON,
 		})
 	}

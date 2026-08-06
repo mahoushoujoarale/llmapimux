@@ -14,13 +14,14 @@ import (
 // Handler is a unified http.Handler that delegates protocol-specific behavior
 // to an inboundCodec and routing decisions to a Router.
 type Handler struct {
-	codec             inboundCodec
-	router            Router
-	auth              Authenticator // nil = no auth
-	stats             StatsReporter
-	reqMod            RequestModifier // nil = no modification
-	attemptController AttemptController
+	codec                 inboundCodec
+	router                Router
+	auth                  Authenticator // nil = no auth
+	stats                 StatsReporter
+	reqMod                RequestModifier // nil = no modification
+	attemptController     AttemptController
 	preserveOriginalModel bool
+	mapDeveloperToSystem  bool
 }
 
 // buildSendError constructs a SendError from the error returned by Send/SendStream.
@@ -297,6 +298,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 6. Apply route result (OriginalModel set once, Model updated per attempt)
 	req.OriginalModel = req.Model
 	req.Model = result.Model
+
+	// Propagate Mux-level toggles to the request so outbound encoders
+	// can adjust their behavior per-request without accessing the Handler.
+	req.MapDeveloperToSystem = h.mapDeveloperToSystem
 
 	startTime := time.Now()
 	// OnRequestStart fires ONCE before the retry loop with the primary target.

@@ -7,33 +7,34 @@ import (
 
 // Mux is the core entry point that creates inbound handlers for a given router.
 type Mux struct {
-	router            Router
-	auth              Authenticator
-	stats             StatsReporter
-	reqMod            RequestModifier
-	attemptController AttemptController
+	router                Router
+	auth                  Authenticator
+	stats                 StatsReporter
+	reqMod                RequestModifier
+	attemptController     AttemptController
 	preserveOriginalModel bool
+	mapDeveloperToSystem  bool
 }
 
 // OpenAIChatHandler returns an http.Handler for OpenAI Chat Completions inbound requests.
 // OpenAIChatHandler returns an http.Handler for OpenAI Chat Completions inbound requests.
 func (m *Mux) OpenAIChatHandler() http.Handler {
-	return &Handler{codec: &openaiChatCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, preserveOriginalModel: m.preserveOriginalModel}
+	return &Handler{codec: &openaiChatCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, preserveOriginalModel: m.preserveOriginalModel, mapDeveloperToSystem: m.mapDeveloperToSystem}
 }
 
 // OpenAIResponsesHandler returns an http.Handler for OpenAI Responses API inbound requests.
 func (m *Mux) OpenAIResponsesHandler() http.Handler {
-	return &Handler{codec: &openaiResponsesCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, preserveOriginalModel: m.preserveOriginalModel}
+	return &Handler{codec: &openaiResponsesCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, preserveOriginalModel: m.preserveOriginalModel, mapDeveloperToSystem: m.mapDeveloperToSystem}
 }
 
 // AnthropicHandler returns an http.Handler for Anthropic Messages inbound requests.
 func (m *Mux) AnthropicHandler() http.Handler {
-	return &Handler{codec: &anthropicCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, preserveOriginalModel: m.preserveOriginalModel}
+	return &Handler{codec: &anthropicCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, preserveOriginalModel: m.preserveOriginalModel, mapDeveloperToSystem: m.mapDeveloperToSystem}
 }
 
 // GeminiHandler returns an http.Handler for Gemini GenerateContent inbound requests.
 func (m *Mux) GeminiHandler() http.Handler {
-	return &Handler{codec: &geminiCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, preserveOriginalModel: m.preserveOriginalModel}
+	return &Handler{codec: &geminiCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, preserveOriginalModel: m.preserveOriginalModel, mapDeveloperToSystem: m.mapDeveloperToSystem}
 }
 
 // MuxOption configures a Mux.
@@ -74,6 +75,22 @@ func WithAttemptController(controller AttemptController) MuxOption {
 
 func WithPreserveOriginalModel(enabled bool) MuxOption {
 	return func(m *Mux) { m.preserveOriginalModel = enabled }
+}
+
+// WithMapDeveloperToSystem configures the gateway to emit SystemPrompt as
+// "system" role (instead of "developer") in outbound OpenAI Chat Completions
+// requests. Many downstream OpenAI-compatible providers (e.g. vLLM, some
+// OpenAI-compatible servers) don't support the "developer" message role and
+// will reject requests containing it with a 400 error.
+//
+// When enabled, the IR's SystemPrompt — which already consolidates all system
+// and developer content (equivalent to vLLM's _consolidate_system_messages) —
+// is emitted as a single "system" role message at position 0 instead of a
+// "developer" role message. This matches the behavior of vLLM PR #43590
+// ("Fold developer-role input messages into system instructions") adapted to
+// the gateway's IR-based architecture.
+func WithMapDeveloperToSystem(enabled bool) MuxOption {
+	return func(m *Mux) { m.mapDeveloperToSystem = enabled }
 }
 
 // NewMux creates a new Mux with a Router and optional configuration.
