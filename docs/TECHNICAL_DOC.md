@@ -802,7 +802,7 @@ OnRequestStart ─────────────────────�
 | `RequestStartEvent` | 请求开始（重试循环之前） | RequestID, InboundProtocol, **OutboundProtocol**（首次目标）, IRRequest |
 | `FirstByteEvent` | 首字节到达 | RequestID, TTFB |
 | `StreamChunkEvent` | 每个流 chunk | SequenceNum, InterChunkDelay, IREvent |
-| `CompleteEvent` | 请求完成 | Status, TTFB, TotalLatency, Usage, AttemptNum, RetryAttempts, QueueWait |
+| `CompleteEvent` | 请求完成 | Status, TTFB (*time.Duration, 流式专用), TotalLatency, Usage, AttemptNum, RetryAttempts, QueueWait |
 | `AttemptErrorEvent` | 尝试失败 | AttemptNum, RetryAttempt, Target, SendErr, WillRetry, RetryDelay |
 
 ### 14.4 完成状态
@@ -1034,8 +1034,12 @@ router := llmapimux.NewCircuitBreakerRouter(
 type myStats struct{ llmapimux.NoopStatsReporter }
 
 func (myStats) OnComplete(ctx context.Context, e llmapimux.CompleteEvent) {
-    log.Printf("request %s: status=%s latency=%v ttfb=%v attempt=%d",
-        e.RequestID, e.Status, e.TotalLatency, e.TTFB, e.AttemptNum)
+    ttfbStr := "n/a"
+    if e.TTFB != nil {
+        ttfbStr = e.TTFB.String()
+    }
+    log.Printf("request %s: status=%s latency=%v ttfb=%s attempt=%d",
+        e.RequestID, e.Status, e.TotalLatency, ttfbStr, e.AttemptNum)
 }
 
 mux := llmapimux.NewMux(router,

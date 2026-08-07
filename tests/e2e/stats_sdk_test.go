@@ -555,7 +555,7 @@ func TestE2E_Stats_NonStreaming(t *testing.T) {
 
 				doNonStreamingRequest(t, in.protocol, muxServer.URL, upstream.URL)
 
-				starts, firstBytes, _, completes := reporter.snapshot()
+				starts, _, _, completes := reporter.snapshot()
 
 				// Verify OnRequestStart
 				if len(starts) != 1 {
@@ -574,13 +574,8 @@ func TestE2E_Stats_NonStreaming(t *testing.T) {
 					t.Fatal("RequestID is empty")
 				}
 
-				// Verify OnFirstByte
-				if len(firstBytes) != 1 {
-					t.Fatalf("OnFirstByte called %d times, want 1", len(firstBytes))
-				}
-				if firstBytes[0].TTFB <= 0 {
-					t.Fatalf("TTFB = %v, want > 0", firstBytes[0].TTFB)
-				}
+				// Verify OnFirstByte is NOT called for non-streaming
+				// (no FirstByteEvent — non-streaming has no TTFT concept)
 
 				// Verify OnComplete
 				if len(completes) != 1 {

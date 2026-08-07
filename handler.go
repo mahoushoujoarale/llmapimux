@@ -91,7 +91,7 @@ func (s *retryLoopState) writeErrorAndComplete(statusCode int, msg string, compE
 		Error:            compErr,
 		InboundProtocol:  s.info.InboundProtocol,
 		OutboundProtocol: s.target.Protocol,
-		TTFB:             0,
+		TTFB:             nil, // non-streaming: no TTFT
 		TotalLatency:     now.Sub(s.startTime),
 		Usage:            Usage{},
 		OutputThroughput: 0,
@@ -414,20 +414,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 
-			// Non-streaming success — record TTFB immediately after Send returns.
-			firstByteTime := time.Now()
+			// Non-streaming success — no TTFT concept (entire response received at once).
 			h.router.OnSuccess(r.Context(), info, loop.target)
-			loop.handleNonStreaming(resp, firstByteTime)
+			loop.handleNonStreaming(resp)
 			return
 		}
 	}
 }
 
-func (s *retryLoopState) handleNonStreaming(resp *Response, firstByteTime time.Time) {
-	var (
-		err  error
-		ttfb = firstByteTime.Sub(s.startTime)
-	)
+func (s *retryLoopState) handleNonStreaming(resp *Response) {
+	var err error
 
 	defer func() {
 		now := time.Now()
@@ -444,10 +440,6 @@ func (s *retryLoopState) handleNonStreaming(resp *Response, firstByteTime time.T
 		if totalLatency > 0 {
 			throughput = float64(usage.CompletionTokens) / totalLatency.Seconds()
 		}
-		tpot := time.Duration(0)
-		if usage.CompletionTokens > 0 && totalLatency > ttfb {
-			tpot = (totalLatency - ttfb) / time.Duration(usage.CompletionTokens)
-		}
 		s.stats.OnComplete(s.r.Context(), CompleteEvent{
 			RequestID:        s.info.RequestID,
 			Time:             now,
@@ -455,11 +447,11 @@ func (s *retryLoopState) handleNonStreaming(resp *Response, firstByteTime time.T
 			Error:            err,
 			InboundProtocol:  s.info.InboundProtocol,
 			OutboundProtocol: s.target.Protocol,
-			TTFB:             ttfb,
+			TTFB:             nil, // non-streaming: no TTFT
 			TotalLatency:     totalLatency,
 			Usage:            usage,
 			OutputThroughput: throughput,
-			TPOT:             tpot,
+			TPOT:             nil, // non-streaming: no TPOT
 			StopReason:       stopReason,
 			ActualModel:      actualModel,
 			IRResponse:       resp,
@@ -468,12 +460,6 @@ func (s *retryLoopState) handleNonStreaming(resp *Response, firstByteTime time.T
 			QueueWait:        s.totalQueueWait,
 		})
 	}()
-
-	s.stats.OnFirstByte(s.r.Context(), FirstByteEvent{
-		RequestID: s.info.RequestID,
-		Time:      firstByteTime,
-		TTFB:      ttfb,
-	})
 
 	if s.h.preserveOriginalModel && s.req.OriginalModel != "" && resp != nil {
 		resp.Model = s.req.OriginalModel
@@ -652,11 +638,11 @@ func (s *retryLoopState) handleStreaming(ch <-chan StreamResult) {
 		Error:            err,
 		InboundProtocol:  s.info.InboundProtocol,
 		OutboundProtocol: s.target.Protocol,
-		TTFB:             summary.ttfb,
+		TTFB:             &summary.ttfb,
 		TotalLatency:     totalLatency,
 		Usage:            summary.usage,
 		OutputThroughput: throughput,
-		TPOT:             tpot,
+		TPOT:             &tpot,
 		Chunks:           summary.chunks,
 		StopReason:       summary.stopReason,
 		ActualModel:      summary.actualModel,

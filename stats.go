@@ -69,14 +69,14 @@ type CompleteEvent struct {
 	InboundProtocol  Protocol
 	OutboundProtocol Protocol
 
-	TTFB         time.Duration
+	TTFB         *time.Duration // nil for non-streaming (no TTFT concept)
 	TotalLatency time.Duration
 
 	Usage Usage
 
 	OutputThroughput float64
-	TPOT             time.Duration // Time Per Output Token = (TotalLatency - TTFB) / CompletionTokens (0 if non-streaming or no output tokens)
-	Chunks           int           // Total streaming chunks received (0 if non-streaming)
+	TPOT             *time.Duration // Time Per Output Token; nil for non-streaming
+	Chunks           int            // Total streaming chunks received (0 if non-streaming)
 
 	StopReason  StopReason
 	ActualModel string

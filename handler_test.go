@@ -403,22 +403,21 @@ func TestHandler_NonStreaming_EmitsStatsLifecycle(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	if got, want := reporter.order, []string{"start", "first_byte", "complete"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+	if got, want := reporter.order, []string{"start", "complete"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("order = %v, want %v", got, want)
 	}
-	if len(reporter.starts) != 1 || len(reporter.firstBytes) != 1 || len(reporter.completions) != 1 {
-		t.Fatalf("events count start/first/complete = %d/%d/%d, want 1/1/1", len(reporter.starts), len(reporter.firstBytes), len(reporter.completions))
+	if len(reporter.starts) != 1 || len(reporter.firstBytes) != 0 || len(reporter.completions) != 1 {
+		t.Fatalf("events count start/first/complete = %d/%d/%d, want 1/0/1", len(reporter.starts), len(reporter.firstBytes), len(reporter.completions))
 	}
 
 	start := reporter.starts[0]
-	first := reporter.firstBytes[0]
 	complete := reporter.completions[0]
 
 	if start.RequestID == "" {
 		t.Fatal("start.RequestID is empty")
 	}
-	if first.RequestID != start.RequestID || complete.RequestID != start.RequestID {
-		t.Fatalf("request IDs mismatch: start=%q first=%q complete=%q", start.RequestID, first.RequestID, complete.RequestID)
+	if complete.RequestID != start.RequestID {
+		t.Fatalf("request IDs mismatch: start=%q complete=%q", start.RequestID, complete.RequestID)
 	}
 	if start.InboundProtocol != ProtocolOpenAIChat {
 		t.Fatalf("start inbound protocol = %q, want %q", start.InboundProtocol, ProtocolOpenAIChat)
@@ -441,14 +440,11 @@ func TestHandler_NonStreaming_EmitsStatsLifecycle(t *testing.T) {
 	if complete.ActualModel != "gpt-4o-mini" {
 		t.Fatalf("actual model = %q, want %q", complete.ActualModel, "gpt-4o-mini")
 	}
-	if first.TTFB <= 0 {
-		t.Fatalf("TTFB = %v, want > 0", first.TTFB)
+	if complete.TTFB != nil {
+		t.Fatalf("complete.TTFB = %v, want nil (non-streaming has no TTFT)", complete.TTFB)
 	}
-	if complete.TTFB <= 0 {
-		t.Fatalf("complete.TTFB = %v, want > 0", complete.TTFB)
-	}
-	if complete.TotalLatency < complete.TTFB {
-		t.Fatalf("TotalLatency = %v, want >= TTFB %v", complete.TotalLatency, complete.TTFB)
+	if complete.TPOT != nil {
+		t.Fatalf("complete.TPOT = %v, want nil (non-streaming has no TPOT)", complete.TPOT)
 	}
 	if complete.OutputThroughput <= 0 {
 		t.Fatalf("OutputThroughput = %v, want > 0", complete.OutputThroughput)
@@ -459,11 +455,8 @@ func TestHandler_NonStreaming_EmitsStatsLifecycle(t *testing.T) {
 	if complete.Error != nil {
 		t.Fatalf("error = %v, want nil", complete.Error)
 	}
-	if first.Time.Before(start.Time) {
-		t.Fatalf("first byte time %v before start time %v", first.Time, start.Time)
-	}
-	if complete.Time.Before(first.Time) {
-		t.Fatalf("complete time %v before first byte time %v", complete.Time, first.Time)
+	if complete.Time.Before(start.Time) {
+		t.Fatalf("complete time %v before start time %v", complete.Time, start.Time)
 	}
 	if complete.Time.Sub(start.Time) < 0 {
 		t.Fatalf("complete occurs before start")
@@ -618,14 +611,14 @@ func TestHandler_Streaming_EmitsStatsLifecycle(t *testing.T) {
 	if complete.Status != CompletionStatusSuccess {
 		t.Fatalf("complete status = %q, want %q", complete.Status, CompletionStatusSuccess)
 	}
-	if complete.TTFB <= 0 {
+	if complete.TTFB == nil || *complete.TTFB <= 0 {
 		t.Fatalf("complete TTFB = %v, want > 0", complete.TTFB)
 	}
 	if first.TTFB <= 0 {
 		t.Fatalf("first TTFB = %v, want > 0", first.TTFB)
 	}
-	if complete.TotalLatency < complete.TTFB {
-		t.Fatalf("total latency = %v, want >= TTFB %v", complete.TotalLatency, complete.TTFB)
+	if complete.TotalLatency < *complete.TTFB {
+		t.Fatalf("total latency = %v, want >= TTFB %v", complete.TotalLatency, *complete.TTFB)
 	}
 	if complete.OutputThroughput < 0 {
 		t.Fatalf("output throughput = %v, want >= 0", complete.OutputThroughput)
