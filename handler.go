@@ -24,6 +24,33 @@ type Handler struct {
 	mapDeveloperToSystem  bool
 }
 
+// extractUpstreamErrorMessage tries to extract a clean error message from an
+// upstream error body. It parses JSON error bodies from known formats
+// (OpenAI, Anthropic, Gemini) and extracts the message field.
+// If parsing fails, it returns the raw body as a string.
+func extractUpstreamErrorMessage(body []byte) string {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return string(body)
+	}
+
+	// OpenAI / Anthropic / Gemini all nest the message under {"error":{...,"message":"..."}}
+	if errRaw, ok := raw["error"]; ok {
+		var errFields map[string]json.RawMessage
+		if json.Unmarshal(errRaw, &errFields) == nil {
+			if msgRaw, ok := errFields["message"]; ok {
+				var msg string
+				if json.Unmarshal(msgRaw, &msg) == nil {
+					return msg
+				}
+			}
+		}
+	}
+
+	// Fallback: return the raw body.
+	return string(body)
+}
+
 // buildSendError constructs a SendError from the error returned by Send/SendStream.
 func buildSendError(err error, attemptNum int) SendError {
 	se := SendError{
@@ -83,6 +110,32 @@ type retryLoopState struct {
 // Used by handleSendError for the two terminal error paths (context canceled, no more fallback targets).
 func (s *retryLoopState) writeErrorAndComplete(statusCode int, msg string, compErr error) {
 	s.h.codec.WriteError(s.w, statusCode, msg)
+	s.fireComplete(compErr)
+}
+
+// writeUpstreamHTTPErrorAndComplete writes an upstream HTTP error response to the client
+// and fires OnComplete. When the inbound and outbound protocols match, the upstream
+// error body is forwarded directly, preserving the exact error structure (code, type, etc.)
+// from the upstream provider. For cross-protocol errors, the error message is extracted
+// from the upstream body and formatted in the inbound protocol's format.
+func (s *retryLoopState) writeUpstreamHTTPErrorAndComplete(statusCode int, upstreamErr *UpstreamHTTPError, compErr error) {
+	if s.info.InboundProtocol == s.target.Protocol && len(upstreamErr.Body) > 0 {
+		// Same protocol: forward the upstream error body directly.
+		// The upstream body is already in the correct format for the client.
+		s.w.Header().Set("Content-Type", "application/json")
+		s.w.WriteHeader(statusCode)
+		s.w.Write(upstreamErr.Body) //nolint:errcheck
+	} else {
+		// Cross-protocol: extract the error message from the upstream body
+		// and format it in the inbound protocol's format.
+		msg := extractUpstreamErrorMessage(upstreamErr.Body)
+		s.h.codec.WriteError(s.w, statusCode, msg)
+	}
+	s.fireComplete(compErr)
+}
+
+// fireComplete fires the OnComplete stats event.
+func (s *retryLoopState) fireComplete(compErr error) {
 	now := time.Now()
 	s.stats.OnComplete(s.r.Context(), CompleteEvent{
 		RequestID:        s.info.RequestID,
@@ -191,11 +244,19 @@ func (s *retryLoopState) handleTerminalSendError(sendErr error, builtErr SendErr
 		if sendErr != nil {
 			statusCode = resolveUpstreamStatusCode(sendErr)
 		}
-		msg := builtErr.Err.Error()
-		if sendErr != nil {
-			msg = errPrefix + sendErr.Error()
+
+		// When we have an upstream HTTP error body, forward it directly for
+		// same-protocol requests or extract the message for cross-protocol.
+		var upstreamErr *UpstreamHTTPError
+		if sendErr != nil && errors.As(sendErr, &upstreamErr) && len(upstreamErr.Body) > 0 {
+			s.writeUpstreamHTTPErrorAndComplete(statusCode, upstreamErr, sendErr)
+		} else {
+			msg := builtErr.Err.Error()
+			if sendErr != nil {
+				msg = errPrefix + sendErr.Error()
+			}
+			s.writeErrorAndComplete(statusCode, msg, sendErr)
 		}
-		s.writeErrorAndComplete(statusCode, msg, sendErr)
 		return RouteResult{}, false
 	}
 

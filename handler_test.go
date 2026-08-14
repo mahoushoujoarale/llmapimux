@@ -1986,3 +1986,206 @@ func TestHandler_PreserveOriginalModel_Disabled(t *testing.T) {
 		t.Errorf("model = %v, want gpt-4o-mini-routed (upstream model when preserveOriginalModel is disabled)", resp["model"])
 	}
 }
+
+func TestHandler_UpstreamError_SameProtocol_ForwardsBody(t *testing.T) {
+	// When the inbound and outbound protocols match, the upstream error body
+	// should be forwarded directly, preserving the exact error structure.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"code":"invalid_parameter_error","message":"The tool_choice parameter does not support being set to required in thinking mode","type":"invalid_request_error"}}`))
+	}))
+	defer upstream.Close()
+
+	router := RouterFunc(func(ctx context.Context, info RouteInfo) (RouteResult, error) {
+		return RouteResult{
+			Protocol: ProtocolOpenAIChat,
+			BaseURL:  upstream.URL,
+			APIKey:   "sk-test",
+			Model:    "gpt-4o",
+		}, nil
+	})
+	mux := NewMux(router)
+
+	body := `{"model":"gpt-4o","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	mux.OpenAIChatHandler().ServeHTTP(w, req)
+
+	// HTTP status code should be preserved from upstream.
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("HTTP status code = %d, want 400", w.Code)
+	}
+
+	// The upstream error body should be forwarded directly.
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response body: %v", err)
+	}
+	errObj, _ := resp["error"].(map[string]any)
+
+	// The upstream error code should be preserved.
+	if errObj["code"] != "invalid_parameter_error" {
+		t.Errorf("error.code = %v, want invalid_parameter_error", errObj["code"])
+	}
+
+	// The upstream error type should be preserved.
+	if errObj["type"] != "invalid_request_error" {
+		t.Errorf("error.type = %v, want invalid_request_error", errObj["type"])
+	}
+
+	// The upstream error message should be preserved (not wrapped).
+	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "tool_choice parameter") {
+		t.Errorf("error.message = %q, should contain the original upstream message", msg)
+	}
+	if msg, _ := errObj["message"].(string); strings.Contains(msg, "upstream error:") {
+		t.Errorf("error.message should not contain mux wrapping, got: %q", msg)
+	}
+}
+
+func TestHandler_UpstreamError_CrossProtocol_ExtractsMessage(t *testing.T) {
+	// When inbound and outbound protocols differ, the mux should extract the
+	// error message from the upstream body and format it in the inbound protocol's format.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"message":"Rate limit exceeded","type":"rate_limit_error","code":"rate_limit_exceeded"}}`))
+	}))
+	defer upstream.Close()
+
+	router := RouterFunc(func(ctx context.Context, info RouteInfo) (RouteResult, error) {
+		return RouteResult{
+			Protocol: ProtocolOpenAIChat,
+			BaseURL:  upstream.URL,
+			APIKey:   "sk-test",
+			Model:    "gpt-4o",
+		}, nil
+	})
+	mux := NewMux(router)
+
+	// Send via Anthropic handler (cross-protocol: Anthropic inbound → OpenAI Chat outbound)
+	reqBody := `{"model":"claude-3-5-sonnet-20241022","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-test")
+	w := httptest.NewRecorder()
+
+	mux.AnthropicHandler().ServeHTTP(w, req)
+
+	// HTTP status code should be preserved from upstream.
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("HTTP status code = %d, want 429", w.Code)
+	}
+
+	// The error message should be extracted from the upstream body (not the raw JSON).
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response body: %v", err)
+	}
+
+	// For Anthropic format, the error type should be "error" (Anthropic envelope).
+	if resp["type"] != "error" {
+		t.Errorf("response type = %v, want error", resp["type"])
+	}
+
+	errObj, _ := resp["error"].(map[string]any)
+	// The message should be extracted from the upstream error, not the raw JSON string.
+	if msg, _ := errObj["message"].(string); strings.HasPrefix(msg, "{") {
+		t.Errorf("error.message appears to be raw JSON, not extracted: %q", msg)
+	}
+	if msg, _ := errObj["message"].(string); msg != "Rate limit exceeded" {
+		t.Errorf("error.message = %q, want Rate limit exceeded", msg)
+	}
+}
+
+func TestHandler_UpstreamError_SameProtocol_StreamingSetupError(t *testing.T) {
+	// When streaming setup fails (pre-HTTP-200), the upstream error body
+	// should also be forwarded directly for same-protocol requests.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"message":"Rate limit exceeded","type":"rate_limit_error","code":"rate_limit_exceeded"}}`))
+	}))
+	defer upstream.Close()
+
+	router := RouterFunc(func(ctx context.Context, info RouteInfo) (RouteResult, error) {
+		return RouteResult{
+			Protocol: ProtocolOpenAIChat,
+			BaseURL:  upstream.URL,
+			APIKey:   "sk-test",
+			Model:    "gpt-4o",
+		}, nil
+	})
+	mux := NewMux(router)
+
+	body := `{"model":"gpt-4o","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hello!"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	mux.OpenAIChatHandler().ServeHTTP(w, req)
+
+	// HTTP status code should be preserved from upstream.
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("HTTP status code = %d, want 429", w.Code)
+	}
+
+	// The upstream error body should be forwarded directly.
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response body: %v", err)
+	}
+	errObj, _ := resp["error"].(map[string]any)
+	if errObj["code"] != "rate_limit_exceeded" {
+		t.Errorf("error.code = %v, want rate_limit_exceeded", errObj["code"])
+	}
+}
+
+func TestExtractUpstreamErrorMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{
+			name: "openai_format",
+			body: []byte(`{"error":{"code":"invalid_parameter_error","message":"The tool_choice parameter is invalid","type":"invalid_request_error"}}`),
+			want: "The tool_choice parameter is invalid",
+		},
+		{
+			name: "anthropic_format",
+			body: []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Rate limit exceeded"}}`),
+			want: "Rate limit exceeded",
+		},
+		{
+			name: "gemini_format",
+			body: []byte(`{"error":{"code":400,"message":"Invalid request","status":"INVALID_ARGUMENT"}}`),
+			want: "Invalid request",
+		},
+		{
+			name: "plain_string",
+			body: []byte(`internal server error`),
+			want: "internal server error",
+		},
+		{
+			name: "empty_body",
+			body: []byte(``),
+			want: "",
+		},
+		{
+			name: "no_message_field",
+			body: []byte(`{"error":{"code":400,"status":"INVALID_ARGUMENT"}}`),
+			want: `{"error":{"code":400,"status":"INVALID_ARGUMENT"}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractUpstreamErrorMessage(tt.body)
+			if got != tt.want {
+				t.Errorf("extractUpstreamErrorMessage(%q) = %q, want %q", string(tt.body), got, tt.want)
+			}
+		})
+	}
+}
