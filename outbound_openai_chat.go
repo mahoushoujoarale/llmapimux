@@ -153,3 +153,8 @@ func (c *OpenAIChatClient) SendStream(ctx context.Context, req *Request, cfg Out
 
 	return ch, nil
 }
+
+// SetHTTPClient allows callers (e.g. Mux WithHTTPClient) to inject a shared
+// *http.Client so connection behavior (proxy, keepalive, pooling) is controlled
+// in one place.
+func (c *OpenAIChatClient) SetHTTPClient(hc *http.Client) { c.HTTPClient = hc }

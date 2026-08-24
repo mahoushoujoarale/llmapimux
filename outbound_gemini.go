@@ -169,3 +169,8 @@ func (c *GeminiClient) SendStream(ctx context.Context, req *Request, cfg Outboun
 
 	return ch, nil
 }
+
+// SetHTTPClient allows callers (e.g. Mux WithHTTPClient) to inject a shared
+// *http.Client so connection behavior (proxy, keepalive, pooling) is controlled
+// in one place.
+func (c *GeminiClient) SetHTTPClient(hc *http.Client) { c.HTTPClient = hc }

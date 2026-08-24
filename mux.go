@@ -12,29 +12,29 @@ type Mux struct {
 	stats                 StatsReporter
 	reqMod                RequestModifier
 	attemptController     AttemptController
+	httpClient            *http.Client // injected into every outbound client
 	preserveOriginalModel bool
 	mapDeveloperToSystem  bool
 }
 
 // OpenAIChatHandler returns an http.Handler for OpenAI Chat Completions inbound requests.
-// OpenAIChatHandler returns an http.Handler for OpenAI Chat Completions inbound requests.
 func (m *Mux) OpenAIChatHandler() http.Handler {
-	return &Handler{codec: &openaiChatCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, preserveOriginalModel: m.preserveOriginalModel, mapDeveloperToSystem: m.mapDeveloperToSystem}
+	return &Handler{codec: &openaiChatCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, httpClient: m.httpClient, preserveOriginalModel: m.preserveOriginalModel, mapDeveloperToSystem: m.mapDeveloperToSystem}
 }
 
 // OpenAIResponsesHandler returns an http.Handler for OpenAI Responses API inbound requests.
 func (m *Mux) OpenAIResponsesHandler() http.Handler {
-	return &Handler{codec: &openaiResponsesCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, preserveOriginalModel: m.preserveOriginalModel, mapDeveloperToSystem: m.mapDeveloperToSystem}
+	return &Handler{codec: &openaiResponsesCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, httpClient: m.httpClient, preserveOriginalModel: m.preserveOriginalModel, mapDeveloperToSystem: m.mapDeveloperToSystem}
 }
 
 // AnthropicHandler returns an http.Handler for Anthropic Messages inbound requests.
 func (m *Mux) AnthropicHandler() http.Handler {
-	return &Handler{codec: &anthropicCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, preserveOriginalModel: m.preserveOriginalModel, mapDeveloperToSystem: m.mapDeveloperToSystem}
+	return &Handler{codec: &anthropicCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, httpClient: m.httpClient, preserveOriginalModel: m.preserveOriginalModel, mapDeveloperToSystem: m.mapDeveloperToSystem}
 }
 
 // GeminiHandler returns an http.Handler for Gemini GenerateContent inbound requests.
 func (m *Mux) GeminiHandler() http.Handler {
-	return &Handler{codec: &geminiCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, preserveOriginalModel: m.preserveOriginalModel, mapDeveloperToSystem: m.mapDeveloperToSystem}
+	return &Handler{codec: &geminiCodec{}, router: m.router, auth: m.auth, stats: m.stats, reqMod: m.reqMod, attemptController: m.attemptController, httpClient: m.httpClient, preserveOriginalModel: m.preserveOriginalModel, mapDeveloperToSystem: m.mapDeveloperToSystem}
 }
 
 // MuxOption configures a Mux.
@@ -75,6 +75,16 @@ func WithAttemptController(controller AttemptController) MuxOption {
 
 func WithPreserveOriginalModel(enabled bool) MuxOption {
 	return func(m *Mux) { m.preserveOriginalModel = enabled }
+}
+
+// WithHTTPClient sets a shared *http.Client that is injected into every
+// outbound client created by the Mux. This lets callers control connection
+// behavior (proxy, TCP keepalive, timeouts, connection pooling) in one place.
+// When a RouteResult carries a ProxyURL, the injected transport is cloned and
+// only its Proxy field is overridden, so caller dial/keepalive settings are
+// preserved. Nil keeps the default client behavior.
+func WithHTTPClient(c *http.Client) MuxOption {
+	return func(m *Mux) { m.httpClient = c }
 }
 
 // WithMapDeveloperToSystem configures the gateway to emit SystemPrompt as

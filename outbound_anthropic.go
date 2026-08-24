@@ -108,3 +108,8 @@ func (c *AnthropicClient) SendStream(ctx context.Context, req *Request, cfg Outb
 
 	return ch, nil
 }
+
+// SetHTTPClient allows callers (e.g. Mux WithHTTPClient) to inject a shared
+// *http.Client so connection behavior (proxy, keepalive, pooling) is controlled
+// in one place.
+func (c *AnthropicClient) SetHTTPClient(hc *http.Client) { c.HTTPClient = hc }

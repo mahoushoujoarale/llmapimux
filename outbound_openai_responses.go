@@ -200,3 +200,8 @@ func requestHasToolType(req *Request, toolType string) bool {
 	}
 	return false
 }
+
+// SetHTTPClient allows callers (e.g. Mux WithHTTPClient) to inject a shared
+// *http.Client so connection behavior (proxy, keepalive, pooling) is controlled
+// in one place.
+func (c *OpenAIResponsesClient) SetHTTPClient(hc *http.Client) { c.HTTPClient = hc }

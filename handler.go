@@ -20,6 +20,7 @@ type Handler struct {
 	stats                 StatsReporter
 	reqMod                RequestModifier // nil = no modification
 	attemptController     AttemptController
+	httpClient            *http.Client // injected into outbound clients; nil = default
 	preserveOriginalModel bool
 	mapDeveloperToSystem  bool
 }
@@ -401,6 +402,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			continue
+		}
+		if h.httpClient != nil {
+			// Inject the caller-supplied HTTP client (WithHTTPClient) so connection
+			// behavior (proxy, keepalive, pooling) is caller-controlled.
+			if setter, ok := client.(interface{ SetHTTPClient(*http.Client) }); ok {
+				setter.SetHTTPClient(h.httpClient)
+			}
 		}
 
 		for retryAttempt := 0; ; retryAttempt++ {

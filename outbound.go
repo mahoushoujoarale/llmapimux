@@ -51,15 +51,30 @@ func resolveUpstreamStatusCode(err error) int {
 	return http.StatusBadGateway
 }
 
-// proxyClients caches http.Client instances per proxy URL to reuse connections.
+// proxyClientKey identifies a cached proxy client by proxy URL and the base
+// transport it was derived from, so different injected transports get separate
+// connection pools.
+type proxyClientKey struct {
+	proxyURL  string
+	transport http.RoundTripper
+}
+
+// proxyClients caches http.Client instances per (proxy URL, base transport)
+// to reuse connections.
 var (
 	proxyClientsMu sync.RWMutex
-	proxyClients   = make(map[string]*http.Client)
+	proxyClients   = make(map[proxyClientKey]*http.Client)
 )
 
 // httpClientForProxy returns an *http.Client configured for the given proxy URL.
 // If proxyURL is empty, returns base (or http.DefaultClient if base is nil).
-// Proxy clients are cached by URL to reuse underlying transports.
+//
+// When proxyURL is set:
+//   - If base carries an *http.Transport, it is cloned and only the Proxy field
+//     is overridden — caller dial/keepalive/TLS settings are preserved.
+//   - Otherwise a default proxy transport is built (TCP keepalive enabled).
+//
+// Derived clients are cached per (proxy URL, base transport) to reuse connections.
 func httpClientForProxy(base *http.Client, proxyURL string) *http.Client {
 	if proxyURL == "" {
 		if base != nil {
@@ -68,8 +83,14 @@ func httpClientForProxy(base *http.Client, proxyURL string) *http.Client {
 		return http.DefaultClient
 	}
 
+	var baseTransport http.RoundTripper
+	if base != nil {
+		baseTransport = base.Transport
+	}
+	key := proxyClientKey{proxyURL: proxyURL, transport: baseTransport}
+
 	proxyClientsMu.RLock()
-	c, ok := proxyClients[proxyURL]
+	c, ok := proxyClients[key]
 	proxyClientsMu.RUnlock()
 	if ok {
 		return c
@@ -78,7 +99,7 @@ func httpClientForProxy(base *http.Client, proxyURL string) *http.Client {
 	proxyClientsMu.Lock()
 	defer proxyClientsMu.Unlock()
 	// Double-check after acquiring write lock.
-	if c, ok = proxyClients[proxyURL]; ok {
+	if c, ok = proxyClients[key]; ok {
 		return c
 	}
 	u, err := url.Parse(proxyURL)
@@ -90,24 +111,31 @@ func httpClientForProxy(base *http.Client, proxyURL string) *http.Client {
 		}
 		return http.DefaultClient
 	}
-	c = &http.Client{
-		Transport: &http.Transport{
+	var rt http.RoundTripper
+	if t, ok := baseTransport.(*http.Transport); ok && t != nil {
+		proxied := t.Clone()
+		proxied.Proxy = http.ProxyURL(u)
+		rt = proxied
+	} else {
+		rt = &http.Transport{
 			Proxy: http.ProxyURL(u),
 			// TCP keepalive: LLM non-streaming requests can go minutes with no
 			// application data in flight; middleboxes (idle NAT / firewall / proxy)
-			// commonly drop such connections after ~2 minutes of silence. Keepalive
-			// probes every 30s keep the client↔proxy TCP connection visibly alive.
-			// (Go enables keepalive by default at 15s, this makes it explicit and
-			// tunable in one place.)
+			// commonly drop such connections after ~2 minutes of silence.
 			DialContext: (&net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
-		},
+		}
 	}
-	proxyClients[proxyURL] = c
+	c = &http.Client{Transport: rt}
+	if base != nil {
+		// Preserve caller-level request timeout (if any) across the proxy variant.
+		c.Timeout = base.Timeout
+	}
+	proxyClients[key] = c
 	return c
 }
 
