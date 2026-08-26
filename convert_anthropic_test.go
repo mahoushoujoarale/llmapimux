@@ -1565,6 +1565,94 @@ func TestEncodeAnthropicStreamEvent_ContentBlockStart_Text(t *testing.T) {
 	}
 }
 
+// TestEncodeAnthropicStreamEvent_ContentBlockStart_SkeletonFields verifies the
+// content_block_start payload carries the type-specific skeleton field even
+// when empty. The native Anthropic API always emits e.g.
+// {"type":"text","text":""} and {"type":"tool_use","id":...,"name":...,"input":{}};
+// clients built against that format (including the Anthropic SDK) reject or
+// mis-handle blocks missing the skeleton field.
+func TestEncodeAnthropicStreamEvent_ContentBlockStart_SkeletonFields(t *testing.T) {
+	cases := []struct {
+		name      string
+		delta     *ContentPart
+		field     string
+		wantRaw   string
+	}{
+		{
+			name:    "text block carries empty text",
+			delta:   &ContentPart{Type: ContentTypeText, Text: &TextContent{}},
+			field:   "text",
+			wantRaw: `""`,
+		},
+		{
+			name:    "thinking block carries empty thinking",
+			delta:   &ContentPart{Type: ContentTypeThinking, Thinking: &ThinkingContent{}},
+			field:   "thinking",
+			wantRaw: `""`,
+		},
+		{
+			name:    "redacted_thinking block carries empty data",
+			delta:   &ContentPart{Type: ContentTypeRedactedThinking, RedactedThinking: &RedactedThinkingContent{}},
+			field:   "data",
+			wantRaw: `""`,
+		},
+		{
+			name: "tool_use block carries empty input object",
+			delta: &ContentPart{
+				Type:    ContentTypeToolUse,
+				ToolUse: &ToolUseContent{ID: "t1", Name: "get_weather"},
+			},
+			field:   "input",
+			wantRaw: `{}`,
+		},
+		{
+			name: "server_tool_use block carries empty input object",
+			delta: &ContentPart{
+				Type:          ContentTypeServerToolUse,
+				ServerToolUse: &ServerToolUseContent{ID: "s1", Name: "web_search"},
+			},
+			field:   "input",
+			wantRaw: `{}`,
+		},
+		{
+			name: "refusal degrades to text block carrying empty text",
+			delta: &ContentPart{
+				Type:    ContentTypeRefusal,
+				Refusal: &RefusalContent{},
+			},
+			field:   "text",
+			wantRaw: `""`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, data, err := EncodeAnthropicStreamEvent(&StreamEvent{
+				Type:  StreamEventContentBlockStart,
+				Index: 0,
+				Delta: tc.delta,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			var block map[string]json.RawMessage
+			if err := json.Unmarshal(raw["content_block"], &block); err != nil {
+				t.Fatalf("unmarshal content_block: %v", err)
+			}
+			got, ok := block[tc.field]
+			if !ok {
+				t.Fatalf("content_block.%s missing, want %s", tc.field, tc.wantRaw)
+			}
+			if string(got) != tc.wantRaw {
+				t.Errorf("content_block.%s = %s, want %s", tc.field, string(got), tc.wantRaw)
+			}
+		})
+	}
+}
+
 func TestEncodeAnthropicStreamEvent_ContentBlockStart_ToolUse(t *testing.T) {
 	event := &StreamEvent{
 		Type:  StreamEventContentBlockStart,

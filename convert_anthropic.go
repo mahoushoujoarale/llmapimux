@@ -1123,6 +1123,65 @@ func DecodeAnthropicStreamEvent(eventType string, data []byte) (*StreamEvent, er
 	}
 }
 
+// anthropicStreamContentBlockStart is the wire envelope of the
+// content_block_start SSE event. ContentBlock is a pre-marshalled payload so
+// the skeleton-field patching below can inject empty fields that struct tags
+// with omitempty would otherwise drop.
+type anthropicStreamContentBlockStart struct {
+	Type         string          `json:"type"`
+	Index        int             `json:"index"`
+	ContentBlock json.RawMessage `json:"content_block"`
+}
+
+// anthropicBlockStartSkeletons lists, per content_block type, the field the
+// native Anthropic API always includes in a content_block_start payload even
+// when empty:
+//
+//	{"type":"text","text":""}
+//	{"type":"thinking","thinking":""}
+//	{"type":"redacted_thinking","data":""}
+//	{"type":"tool_use","id":...,"name":...,"input":{}}
+//	{"type":"server_tool_use","id":...,"name":...,"input":{}}
+//	{"type":"web_search_tool_result","tool_use_id":...,"content":[]}
+//
+// anthropic.ContentBlock's omitempty tags drop empty values, producing e.g.
+// {"type":"text"} — clients built against the native wire format (including
+// the Anthropic SDK) treat the missing field as malformed.
+var anthropicBlockStartSkeletons = map[string]map[string]json.RawMessage{
+	"text":                   {"text": json.RawMessage(`""`)},
+	"thinking":               {"thinking": json.RawMessage(`""`)},
+	"redacted_thinking":      {"data": json.RawMessage(`""`)},
+	"tool_use":               {"input": json.RawMessage(`{}`)},
+	"server_tool_use":        {"input": json.RawMessage(`{}`)},
+	"web_search_tool_result": {"content": json.RawMessage(`[]`)},
+}
+
+// ensureAnthropicBlockStartSkeleton marshals block and re-adds any missing
+// skeleton field listed in anthropicBlockStartSkeletons. Fields already present
+// (with non-empty values from the IR) are left untouched. This only affects the
+// streaming content_block_start event; request bodies and non-streaming
+// responses keep the omitempty behaviour.
+func ensureAnthropicBlockStartSkeleton(block anthropic.ContentBlock) (json.RawMessage, error) {
+	data, err := json.Marshal(block)
+	if err != nil {
+		return nil, err
+	}
+	skeleton, ok := anthropicBlockStartSkeletons[block.Type]
+	if !ok {
+		return data, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	for k, v := range skeleton {
+		if _, exists := fields[k]; !exists {
+			fields[k] = v
+		}
+	}
+	return json.Marshal(fields)
+}
+
 // EncodeAnthropicStreamEvent encodes a unified IR StreamEvent into an Anthropic SSE event.
 // Returns the SSE event type string and the JSON data bytes.
 func EncodeAnthropicStreamEvent(event *StreamEvent) (string, []byte, error) {
@@ -1173,12 +1232,15 @@ func EncodeAnthropicStreamEvent(event *StreamEvent) (string, []byte, error) {
 		if err != nil {
 			return "", nil, fmt.Errorf("encode anthropic stream content_block_start block: %w", err)
 		}
-		raw := anthropic.StreamContentBlockStart{
+		blockJSON, err := ensureAnthropicBlockStartSkeleton(block)
+		if err != nil {
+			return "", nil, fmt.Errorf("encode anthropic stream content_block_start skeleton: %w", err)
+		}
+		data, err := json.Marshal(anthropicStreamContentBlockStart{
 			Type:         "content_block_start",
 			Index:        event.Index,
-			ContentBlock: block,
-		}
-		data, err := json.Marshal(raw)
+			ContentBlock: blockJSON,
+		})
 		if err != nil {
 			return "", nil, fmt.Errorf("encode anthropic stream content_block_start: %w", err)
 		}
