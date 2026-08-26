@@ -3,7 +3,17 @@ package llmapimux
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 )
+
+// pendingToolBlock buffers a tool_use / server_tool_use stream that cannot be
+// emitted live. See WriteStreamingResponse for why buffering is required.
+type pendingToolBlock struct {
+	isServer bool
+	id       string
+	name     string
+	args     strings.Builder
+}
 
 // anthropicCodec implements inboundCodec for the Anthropic Messages protocol.
 type anthropicCodec struct{}
@@ -50,6 +60,25 @@ func (c *anthropicCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan 
 	//
 	// We therefore keep exactly one Anthropic block open at a time: opening a new
 	// block implicitly closes the current one.
+	//
+	// Tool calls are the exception. OpenAI Chat streams parallel tool_call
+	// deltas keyed by their own array index, and nothing stops a provider from
+	// interleaving them (tc0 args, tc1 args, more tc0 args, ...). The
+	// one-open-block model cannot express that: resuming tc0 after tc1 opened
+	// would require appending to a closed block, so opening a fresh block
+	// produces an id-less tool_use fragment carrying the remainder of the
+	// arguments — a corrupt assistant message for clients such as Claude Code,
+	// which then fail the turn and rewrite history (duplicated user turns,
+	// broken prompt-cache prefixes).
+	//
+	// Synthetic tool deltas (no real content_block_start from the upstream) are
+	// therefore accumulated per source index and flushed as complete blocks at
+	// the end of the stream, in first-seen order. Text/thinking still stream
+	// live; a text block arriving between tool deltas is emitted before them,
+	// which only reorders blocks in the rare text-after-tool-call case and
+	// never corrupts content. Deltas that DID come with a real
+	// content_block_start (native Anthropic upstream) keep streaming live
+	// untouched.
 	type openBlock struct {
 		index       int
 		contentType ContentType
@@ -70,6 +99,14 @@ func (c *anthropicCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan 
 	// sourceIndexMap remembers which Anthropic index an IR source index currently
 	// maps to, so repeated deltas on the same source index reuse the same block.
 	sourceIndexMap := map[int]int{}
+	// liveToolStarted records source indices whose tool block was opened by a
+	// real upstream content_block_start (native Anthropic pass-through). Those
+	// keep streaming live; only synthetic tool deltas are buffered.
+	liveToolStarted := map[int]bool{}
+	// pendingTools buffers synthetic tool deltas keyed by IR source index;
+	// toolOrder preserves first-seen order for the final flush.
+	pendingTools := map[int]*pendingToolBlock{}
+	var toolOrder []int
 
 	writeSSE := func(event *StreamEvent) bool {
 		eventType, data, err := EncodeAnthropicStreamEvent(event)
@@ -147,6 +184,76 @@ func (c *anthropicCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan 
 		return false
 	}
 
+	// bufferToolDelta accumulates a synthetic tool_use / server_tool_use delta
+	// for the end-of-stream flush.
+	bufferToolDelta := func(srcIdx int, delta *ContentPart) {
+		tb := pendingTools[srcIdx]
+		if tb == nil {
+			tb = &pendingToolBlock{}
+			pendingTools[srcIdx] = tb
+			toolOrder = append(toolOrder, srcIdx)
+		}
+		if delta.ToolUse != nil {
+			if delta.ToolUse.ID != "" {
+				tb.id = delta.ToolUse.ID
+			}
+			if delta.ToolUse.Name != "" {
+				tb.name = delta.ToolUse.Name
+			}
+			tb.args.WriteString(string(delta.ToolUse.Arguments))
+		}
+		if delta.ServerToolUse != nil {
+			tb.isServer = true
+			if delta.ServerToolUse.ID != "" {
+				tb.id = delta.ServerToolUse.ID
+			}
+			if delta.ServerToolUse.Name != "" {
+				tb.name = delta.ServerToolUse.Name
+			}
+			tb.args.WriteString(string(delta.ServerToolUse.Arguments))
+		}
+	}
+
+	// flushPendingTools emits every buffered tool call as one complete content
+	// block — content_block_start with the id/name skeleton, a single
+	// input_json_delta carrying the full accumulated arguments, and
+	// content_block_stop — in first-seen order. Idempotent: buffers are cleared
+	// after the flush.
+	flushPendingTools := func() bool {
+		for _, srcIdx := range toolOrder {
+			tb := pendingTools[srcIdx]
+			blockType := ContentTypeToolUse
+			startPart := ContentPart{ToolUse: &ToolUseContent{ID: tb.id, Name: tb.name}}
+			if tb.isServer {
+				blockType = ContentTypeServerToolUse
+				startPart = ContentPart{ServerToolUse: &ServerToolUseContent{ID: tb.id, Name: tb.name}}
+			}
+			startPart.Type = blockType
+			idx, ok := openBlockAt(blockType, &startPart)
+			if !ok {
+				return false
+			}
+			if tb.args.Len() > 0 {
+				args := json.RawMessage(tb.args.String())
+				deltaPart := ContentPart{Type: blockType}
+				if tb.isServer {
+					deltaPart.ServerToolUse = &ServerToolUseContent{Arguments: args}
+				} else {
+					deltaPart.ToolUse = &ToolUseContent{Arguments: args}
+				}
+				if !writeSSE(&StreamEvent{Type: StreamEventDelta, Index: idx, Delta: &deltaPart}) {
+					return false
+				}
+			}
+			if !closeCurrent() {
+				return false
+			}
+		}
+		toolOrder = nil
+		pendingTools = map[int]*pendingToolBlock{}
+		return true
+	}
+
 	for result := range ch {
 		if result.Err != nil {
 			// Status code is already committed — surface the failure as an SSE
@@ -206,6 +313,22 @@ func (c *anthropicCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan 
 				return
 			}
 			sourceIndexMap[event.Index] = idx
+			if deltaType == ContentTypeToolUse || deltaType == ContentTypeServerToolUse {
+				// A real block start: this tool streams live from here on. If a
+				// synthetic buffer had already accumulated for the same index
+				// (mixed-lifecycle upstream), drop it so the call is not emitted twice.
+				liveToolStarted[event.Index] = true
+				if _, buffered := pendingTools[event.Index]; buffered {
+					delete(pendingTools, event.Index)
+					filtered := toolOrder[:0]
+					for _, k := range toolOrder {
+						if k != event.Index {
+							filtered = append(filtered, k)
+						}
+					}
+					toolOrder = filtered
+				}
+			}
 			continue
 
 		case StreamEventContentBlockStop:
@@ -229,6 +352,18 @@ func (c *anthropicCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan 
 				messageDeltaSent = true
 			}
 			if event.Delta != nil && isBlockDelta(event.Delta.Type) {
+				// Synthetic tool deltas (OpenAI Chat tool_call deltas carry no
+				// block lifecycle) are buffered so interleaved parallel calls
+				// cannot be split into id-less fragments; they flush as complete
+				// blocks at end of stream. Tool deltas with a real upstream
+				// content_block_start keep streaming live below.
+				switch event.Delta.Type {
+				case ContentTypeToolUse, ContentTypeServerToolUse:
+					if !liveToolStarted[event.Index] {
+						bufferToolDelta(event.Index, event.Delta)
+						continue
+					}
+				}
 				srcIdx := event.Index
 				anthIdx, mapped := sourceIndexMap[srcIdx]
 				// Reopen when this source index has no block, when its block was
@@ -252,6 +387,11 @@ func (c *anthropicCodec) WriteStreamingResponse(sseWriter *SSEWriter, ch <-chan 
 			// only refreshes AsAny() on content_block_stop, so omitting it leaves
 			// the block's raw JSON stale.
 			if !closeCurrent() {
+				return
+			}
+			// Emit buffered tool calls as complete blocks before the terminating
+			// message_delta / message_stop, in first-seen order.
+			if !flushPendingTools() {
 				return
 			}
 			// Anthropic carries stop_reason and final usage in message_delta, which
