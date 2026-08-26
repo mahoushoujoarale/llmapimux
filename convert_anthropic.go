@@ -241,8 +241,48 @@ func convertAnthropicContentBlocks(blocks []anthropic.ContentBlock) ([]ContentPa
 	return parts, nil
 }
 
+// anthropicBlockExtraKeys lists block-level Anthropic fields that are worth
+// carrying through the IR. cache_control is the one that matters: it marks a
+// prompt-cache breakpoint, and dropping it turns prompt caching off entirely.
+//
+// The list is deliberately narrow rather than "everything unknown", so that a
+// stray field on an inbound block cannot be replayed to the upstream API and
+// turn into a 400.
+var anthropicBlockExtraKeys = []string{"cache_control"}
+
+// anthropicBlockExtra extracts the carry-through block fields from a wire block.
+func anthropicBlockExtra(b anthropic.ContentBlock) map[string]json.RawMessage {
+	if len(b.ExtraFields) == 0 {
+		return nil
+	}
+	var extra map[string]json.RawMessage
+	for _, key := range anthropicBlockExtraKeys {
+		v, ok := b.ExtraFields[key]
+		if !ok {
+			continue
+		}
+		if extra == nil {
+			extra = make(map[string]json.RawMessage, len(anthropicBlockExtraKeys))
+		}
+		extra[key] = v
+	}
+	return extra
+}
+
 // convertAnthropicContentBlock converts a single anthropic.ContentBlock to an IR ContentPart.
+//
+// Block-level extras (cache_control) are attached to the resulting part so a
+// same-protocol round-trip preserves prompt-cache breakpoints.
 func convertAnthropicContentBlock(b anthropic.ContentBlock) (ContentPart, error) {
+	part, err := convertAnthropicContentBlockBody(b)
+	if err != nil {
+		return ContentPart{}, err
+	}
+	part.BlockExtra = anthropicBlockExtra(b)
+	return part, nil
+}
+
+func convertAnthropicContentBlockBody(b anthropic.ContentBlock) (ContentPart, error) {
 	switch b.Type {
 	case "text":
 		part := ContentPart{
@@ -656,6 +696,13 @@ func encodeAnthropicMessage(m Message) (anthropic.Message, error) {
 	case RoleTool:
 		// Anthropic uses "user" role for tool result messages.
 		role = "user"
+	case RoleSystem:
+		// Anthropic's messages array only accepts "user" and "assistant"; the
+		// system prompt is a separate top-level field and cannot express a
+		// mid-conversation instruction. Emitting role "system" here is a 400, so
+		// the turn is degraded to a user message, which is how such instructions
+		// are conventionally injected in the Anthropic API.
+		role = "user"
 	default:
 		role = string(m.Role)
 	}
@@ -690,7 +737,39 @@ func encodeAnthropicContentParts(parts []ContentPart) ([]anthropic.ContentBlock,
 }
 
 // encodeAnthropicContentPart converts a single IR ContentPart to an anthropic.ContentBlock.
+//
+// Carried block extras (cache_control) are re-attached so prompt-cache
+// breakpoints survive the round-trip. Parts that arrived from a different
+// protocol have no BlockExtra and are unaffected.
 func encodeAnthropicContentPart(p ContentPart) (anthropic.ContentBlock, error) {
+	b, err := encodeAnthropicContentPartBody(p)
+	if err != nil {
+		return anthropic.ContentBlock{}, err
+	}
+	if len(p.BlockExtra) > 0 {
+		b.ExtraFields = anthropicBlockExtraForEncode(p.BlockExtra)
+	}
+	return b, nil
+}
+
+// anthropicBlockExtraForEncode filters the IR carry-through map down to the keys
+// this encoder is willing to put back on the wire.
+func anthropicBlockExtraForEncode(extra map[string]json.RawMessage) map[string]json.RawMessage {
+	var out map[string]json.RawMessage
+	for _, key := range anthropicBlockExtraKeys {
+		v, ok := extra[key]
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]json.RawMessage, len(anthropicBlockExtraKeys))
+		}
+		out[key] = v
+	}
+	return out
+}
+
+func encodeAnthropicContentPartBody(p ContentPart) (anthropic.ContentBlock, error) {
 	switch p.Type {
 	case ContentTypeText:
 		b := anthropic.ContentBlock{Type: "text"}

@@ -154,17 +154,34 @@ func DecodeOpenAIChatRequest(body []byte) (*Request, error) {
 	}
 
 	// Messages
+	//
+	// Only the leading run of system/developer messages is hoisted into
+	// SystemPrompt. A system message that appears *after* a user or assistant turn
+	// is a mid-conversation instruction whose position carries meaning ("from here
+	// on, answer in JSON"); moving it to the front changes what the model is told
+	// and when. Those are kept in place as RoleSystem messages and re-emitted at
+	// their original index by the encoders.
 	var systemParts []ContentPart
 	var messages []Message
+	systemPrefix := true
 	for i, m := range raw.Messages {
+		if m.Role != "system" && m.Role != "developer" {
+			systemPrefix = false
+		}
 		switch m.Role {
 		case "system", "developer":
-			// Accumulate into SystemPrompt
 			parts, err := decodeOpenAIChatMessageContent(m.Content)
 			if err != nil {
 				return nil, fmt.Errorf("decode openai chat request messages[%d]: %w", i, err)
 			}
-			systemParts = append(systemParts, parts...)
+			if systemPrefix {
+				systemParts = append(systemParts, parts...)
+				continue
+			}
+			messages = append(messages, Message{
+				Role:    RoleSystem,
+				Content: parts,
+			})
 
 		case "user":
 			parts, err := decodeOpenAIChatMessageContent(m.Content)
@@ -532,9 +549,13 @@ func EncodeOpenAIChatRequest(req *Request) ([]byte, error) {
 	// When MapDeveloperToSystem is true, emit as "system" role instead of
 	// "developer". Many downstream OpenAI-compatible providers (e.g. vLLM)
 	// don't support the "developer" role and reject it with a 400.
-	// The IR already consolidates all system and developer content into
-	// SystemPrompt (equivalent to vLLM's _consolidate_system_messages),
-	// so the output is always a single system message at position 0.
+	//
+	// The IR consolidates the *leading* run of system and developer content into
+	// SystemPrompt (equivalent to vLLM's _consolidate_system_messages), so this
+	// emits a single system message at position 0. System messages that appeared
+	// after the conversation started are carried in Messages as RoleSystem and
+	// re-emitted at their original index instead, since hoisting them would
+	// change both their meaning and the cacheable token prefix.
 	if len(req.SystemPrompt) > 0 {
 		content := encodeOpenAIChatContentParts(req.SystemPrompt)
 		contentJSON, err := json.Marshal(content)
@@ -553,7 +574,7 @@ func EncodeOpenAIChatRequest(req *Request) ([]byte, error) {
 
 	// Messages
 	for i, m := range req.Messages {
-		msgs, err := encodeOpenAIChatMessages(m)
+		msgs, err := encodeOpenAIChatMessages(m, req.MapDeveloperToSystem)
 		if err != nil {
 			return nil, fmt.Errorf("encode openai chat request messages[%d]: %w", i, err)
 		}
@@ -646,34 +667,59 @@ func EncodeOpenAIChatRequest(req *Request) ([]byte, error) {
 // encodeOpenAIChatMessages converts an IR Message to one or more openaichat.ChatMessages.
 // A single IR message may produce multiple Chat messages when a RoleUser message
 // contains mixed content (e.g. tool_result + text from Anthropic inbound).
-func encodeOpenAIChatMessages(m Message) ([]openaichat.ChatMessage, error) {
+//
+// mapDeveloperToSystem mirrors Request.MapDeveloperToSystem and only affects the
+// role name chosen for mid-conversation system messages.
+func encodeOpenAIChatMessages(m Message, mapDeveloperToSystem bool) ([]openaichat.ChatMessage, error) {
 	switch m.Role {
 	case RoleUser:
-		// Split tool_result parts into separate "tool" messages;
-		// remaining parts become a user message.
+		// Split tool_result parts into separate "tool" messages; the rest become
+		// user messages.
+		//
+		// Order is preserved by flushing the pending user parts before each tool
+		// message instead of hoisting all tool results to the front. Anthropic
+		// allows a user turn to interleave tool_result and text blocks, and the
+		// text often qualifies the results ("the first call failed, retry with
+		// ..."), so reordering changes the meaning of the turn. It also perturbs
+		// the token prefix and defeats prompt caching.
 		var msgs []openaichat.ChatMessage
 		var userParts []ContentPart
-		for _, p := range m.Content {
-			if p.Type == ContentTypeToolResult && p.ToolResult != nil {
-				toolMsg, err := encodeOpenAIChatToolResultPart(p)
-				if err != nil {
-					return nil, err
-				}
-				msgs = append(msgs, toolMsg)
-			} else {
-				userParts = append(userParts, p)
+
+		flushUser := func() error {
+			if len(userParts) == 0 {
+				return nil
 			}
-		}
-		if len(userParts) > 0 {
 			content := ensureNonEmptyChatContent(encodeOpenAIChatContentParts(userParts))
 			contentJSON, err := json.Marshal(content)
 			if err != nil {
-				return nil, fmt.Errorf("marshal user content: %w", err)
+				return fmt.Errorf("marshal user content: %w", err)
 			}
 			msgs = append(msgs, openaichat.ChatMessage{
 				Role:    "user",
 				Content: contentJSON,
 			})
+			userParts = nil
+			return nil
+		}
+
+		for _, p := range m.Content {
+			if p.Type == ContentTypeToolResult && p.ToolResult != nil {
+				// A tool message may not follow a user message that answers it,
+				// so anything accumulated so far is emitted first.
+				if err := flushUser(); err != nil {
+					return nil, err
+				}
+				toolMsg, err := encodeOpenAIChatToolResultPart(p)
+				if err != nil {
+					return nil, err
+				}
+				msgs = append(msgs, toolMsg)
+				continue
+			}
+			userParts = append(userParts, p)
+		}
+		if err := flushUser(); err != nil {
+			return nil, err
 		}
 		return msgs, nil
 
@@ -686,6 +732,26 @@ func encodeOpenAIChatMessages(m Message) ([]openaichat.ChatMessage, error) {
 
 	case RoleTool:
 		return encodeOpenAIChatToolMessages(m)
+
+	case RoleSystem:
+		// A mid-conversation system message, preserved at its original position by
+		// the decoder. The role name follows the same MapDeveloperToSystem rule as
+		// the hoisted system prompt.
+		content := ensureNonEmptyChatContent(encodeOpenAIChatContentParts(m.Content))
+		contentJSON, err := json.Marshal(content)
+		if err != nil {
+			return nil, fmt.Errorf("marshal system content: %w", err)
+		}
+		role := "developer"
+		if mapDeveloperToSystem {
+			role = "system"
+		}
+		return []openaichat.ChatMessage{
+			{
+				Role:    role,
+				Content: contentJSON,
+			},
+		}, nil
 
 	default:
 		content := ensureNonEmptyChatContent(encodeOpenAIChatContentParts(m.Content))
@@ -775,9 +841,26 @@ func encodeOpenAIChatAssistantMessage(m Message) (openaichat.ChatMessage, error)
 					},
 				})
 			}
+		case ContentTypeDocument:
+			// No assistant-side document representation in Chat Completions.
+			if text := documentPlaceholderText(p.Document); text != "" {
+				textParts = append(textParts, text)
+			}
+		default:
+			// Anything else (video, server tool use, web search results) is
+			// rendered as a text note rather than dropped, so the assistant turn
+			// keeps some trace of what the model produced.
+			if text := unrepresentablePlaceholderText(p); text != "" {
+				textParts = append(textParts, text)
+			}
 		}
 	}
 
+	// OpenAI requires an assistant message to carry content or tool_calls; a
+	// message with neither is rejected. This happens when every part was
+	// unrepresentable, or when only thinking survived — reasoning_content is a
+	// non-standard extension and does not satisfy the requirement. Emit an empty
+	// string in that case so the turn is still well-formed.
 	if len(textParts) > 0 {
 		text := strings.Join(textParts, "")
 		contentJSON, err := json.Marshal(text)
@@ -785,6 +868,8 @@ func encodeOpenAIChatAssistantMessage(m Message) (openaichat.ChatMessage, error)
 			return openaichat.ChatMessage{}, fmt.Errorf("marshal assistant content: %w", err)
 		}
 		msg.Content = contentJSON
+	} else if len(toolCalls) == 0 {
+		msg.Content = json.RawMessage(`""`)
 	}
 
 	if len(reasoningParts) > 0 {

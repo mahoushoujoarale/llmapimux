@@ -100,6 +100,14 @@ type ContentPart struct {
 	// Used by downstream consumers (Stats, logging) to identify degradation.
 	// Silently dropped on wire — not serialized to any protocol.
 	SourceType ContentType `json:"source_type,omitempty"`
+	// BlockExtra carries block-level protocol fields that the IR does not model,
+	// keyed by their original wire name (e.g. "cache_control"). It exists so that
+	// Anthropic prompt-caching breakpoints survive a decode/encode round-trip:
+	// dropping cache_control disables caching for the entire request.
+	//
+	// Only re-emitted when the outbound protocol matches the protocol that
+	// produced it, since these keys are not portable across protocols.
+	BlockExtra map[string]json.RawMessage `json:"-"`
 }
 
 // TextContent holds plain text.

@@ -1,7 +1,7 @@
 package llmapimux
 
 import (
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -352,12 +352,24 @@ func jsonSchemaFloat(v interface{}) (float64, bool) {
 	}
 }
 
-// generateSyntheticID generates a synthetic UUID-like ID for Gemini function calls/responses
-// that lack an explicit ID.
-func generateSyntheticID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("call_%x", b)
+// syntheticIDFor derives a stable synthetic ID for a Gemini function call or
+// response that carries no explicit ID.
+//
+// This must be deterministic. Prompt caching on every downstream protocol keys on
+// a byte-identical request prefix, and Gemini omits function-call IDs, so a random
+// ID minted per decode would change the replayed history on every request and
+// invalidate the cache from the first tool call onward. Hashing the stable
+// identity of the call (name, arguments, and its ordinal among same-named calls)
+// yields the same ID for the same input while still distinguishing parallel calls
+// to one function.
+func syntheticIDFor(name string, args []byte, ordinal int) string {
+	h := sha256.New()
+	h.Write([]byte(name))
+	h.Write([]byte{0})
+	h.Write(args)
+	h.Write([]byte{0})
+	h.Write([]byte(strconv.Itoa(ordinal)))
+	return fmt.Sprintf("call_%x", h.Sum(nil)[:16])
 }
 
 // distributeCitationsToTextParts assigns candidate-level citations to the text content parts
@@ -583,13 +595,30 @@ func DecodeGeminiRequest(urlPath string, body []byte) (*Request, error) {
 type geminiToolCorrelator struct {
 	idsByName  map[string][]string
 	nextByName map[string]int
+	// ordinals counts how many synthetic IDs have been minted per function name,
+	// so parallel calls to the same function with identical arguments still get
+	// distinct — but reproducible — IDs.
+	ordinals map[string]int
 }
 
 func newGeminiToolCorrelator() *geminiToolCorrelator {
 	return &geminiToolCorrelator{
 		idsByName:  make(map[string][]string),
 		nextByName: make(map[string]int),
+		ordinals:   make(map[string]int),
 	}
+}
+
+// syntheticID mints a deterministic ID for a call that arrived without one.
+func (c *geminiToolCorrelator) syntheticID(name string, args []byte) string {
+	if c == nil {
+		// No request-level context (system instruction, response decoding): the
+		// ordinal is always 0, which is still deterministic for a given payload.
+		return syntheticIDFor(name, args, 0)
+	}
+	ordinal := c.ordinals[name]
+	c.ordinals[name] = ordinal + 1
+	return syntheticIDFor(name, args, ordinal)
 }
 
 func (c *geminiToolCorrelator) record(name, id string) {
@@ -651,7 +680,7 @@ func convertGeminiContentToMessage(c gemini.Content, correlator *geminiToolCorre
 func convertGeminiPartsToIR(parts []gemini.Part, correlator *geminiToolCorrelator) ([]ContentPart, error) {
 	result := make([]ContentPart, 0, len(parts))
 	for i, p := range parts {
-		cp, err := convertGeminiPartToIR(p)
+		cp, err := convertGeminiPartToIR(p, correlator)
 		if err != nil {
 			return nil, fmt.Errorf("part[%d]: %w", i, err)
 		}
@@ -669,12 +698,12 @@ func convertGeminiPartsToIR(parts []gemini.Part, correlator *geminiToolCorrelato
 }
 
 // convertGeminiPartToIR converts a single gemini.Part to an IR ContentPart.
-func convertGeminiPartToIR(p gemini.Part) (ContentPart, error) {
+func convertGeminiPartToIR(p gemini.Part, correlator *geminiToolCorrelator) (ContentPart, error) {
 	switch {
 	case p.FunctionCall != nil:
 		id := p.FunctionCall.ID
 		if id == "" {
-			id = generateSyntheticID()
+			id = correlator.syntheticID(p.FunctionCall.Name, p.FunctionCall.Args)
 		}
 		return ContentPart{
 			Type: ContentTypeToolUse,
@@ -688,7 +717,9 @@ func convertGeminiPartToIR(p gemini.Part) (ContentPart, error) {
 	case p.FunctionResponse != nil:
 		id := p.FunctionResponse.ID
 		if id == "" {
-			id = generateSyntheticID()
+			// Correlation against a recorded call ID happens in the caller; this
+			// is only the fallback when no matching call was seen.
+			id = correlator.syntheticID(p.FunctionResponse.Name, p.FunctionResponse.Response)
 		}
 		// Wrap the response JSON as text content inside the tool result
 		var content []ContentPart
@@ -1037,6 +1068,12 @@ func encodeIRMessageToGemini(m Message, toolNameByID map[string]string) gemini.C
 		role = "model"
 	case RoleTool:
 		// Gemini has no native "tool" role — use "user" with FunctionResponse parts
+		role = "user"
+	case RoleSystem:
+		// systemInstruction is a single request-level field with no position, so a
+		// mid-conversation system message cannot go there without moving it ahead
+		// of the turns it was meant to follow. Gemini's contents array only accepts
+		// "user" and "model", so the instruction is emitted as a user turn in place.
 		role = "user"
 	default:
 		role = string(m.Role)

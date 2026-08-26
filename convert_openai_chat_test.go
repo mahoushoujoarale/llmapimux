@@ -1,8 +1,11 @@
 package llmapimux
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/mahoushoujoarale/llmapimux/protocol/openaichat"
@@ -1950,6 +1953,196 @@ func TestAnthropicToOpenAIChat_MixedToolResult(t *testing.T) {
 	}
 	if !foundTool {
 		t.Errorf("no tool message found for toolu_xyz in messages: %s", data)
+	}
+}
+
+// TestAnthropicToOpenAIChat_ClaudeCodeStyleHistory_PreservesPerTurnMessages
+// guards the multi-turn history structure on the Anthropic → OpenAI Chat route.
+//
+// A regression that folds multiple conversation turns into a single assistant
+// message is invisible to single-message round-trip tests but destroys prompt
+// cache hit rates at prefix-caching providers, so the exact per-turn message
+// layout is asserted here: one Chat message per conversation turn, tool results
+// as separate "tool" messages, thinking carried as reasoning_content on the
+// same (and only the same) assistant turn.
+func TestAnthropicToOpenAIChat_ClaudeCodeStyleHistory_PreservesPerTurnMessages(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"max_tokens": 4096,
+		"system": "You are helpful.",
+		"thinking": {"type": "enabled", "budget_tokens": 1024},
+		"tools": [{"name": "get_weather", "description": "Get weather", "input_schema": {"type":"object","properties":{"city":{"type":"string"}}}}],
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Weather in Beijing?"}]},
+			{"role": "assistant", "content": [
+				{"type": "thinking", "thinking": "I should call the weather tool", "signature": "sig1"},
+				{"type": "tool_use", "id": "tu_1", "name": "get_weather", "input": {"city": "Beijing"}}
+			]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "tu_1", "content": "Sunny 25C"}
+			]},
+			{"role": "assistant", "content": [
+				{"type": "thinking", "thinking": "Now I can answer", "signature": "sig2"},
+				{"type": "text", "text": "It is sunny, 25C"}
+			]},
+			{"role": "user", "content": [{"type": "text", "text": "Thanks, and in Shanghai?"}]},
+			{"role": "assistant", "content": [
+				{"type": "text", "text": "Checking..."}
+			]},
+			{"role": "user", "content": [{"type": "text", "text": "Never mind"}]}
+		]
+	}`)
+
+	irReq, err := DecodeAnthropicRequest(body)
+	if err != nil {
+		t.Fatalf("decode anthropic: %v", err)
+	}
+	irReq.Model = "gpt-4o"
+
+	data, err := EncodeOpenAIChatRequest(irReq)
+	if err != nil {
+		t.Fatalf("encode openai chat: %v", err)
+	}
+
+	var raw struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal outbound: %v", err)
+	}
+
+	// developer(system) + u + a(tool_calls) + tool + a(text) + u + a + u = 8
+	wantRoles := []string{
+		"developer",
+		"user",
+		"assistant",
+		"tool",
+		"assistant",
+		"user",
+		"assistant",
+		"user",
+	}
+	if len(raw.Messages) != len(wantRoles) {
+		t.Fatalf("messages len = %d, want %d; got: %s", len(raw.Messages), len(wantRoles), data)
+	}
+
+	type wireMsg struct {
+		Role             string          `json:"role"`
+		Content          json.RawMessage `json:"content"`
+		ReasoningContent string          `json:"reasoning_content"`
+		ToolCalls        []struct {
+			ID       string `json:"id"`
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tool_calls"`
+		ToolCallID string `json:"tool_call_id"`
+	}
+	var msgs []wireMsg
+	for i, m := range raw.Messages {
+		var wm wireMsg
+		if err := json.Unmarshal(m, &wm); err != nil {
+			t.Fatalf("unmarshal messages[%d]: %v", i, err)
+		}
+		msgs = append(msgs, wm)
+		if wm.Role != wantRoles[i] {
+			t.Errorf("messages[%d].role = %q, want %q (turns must map 1:1, not merge); body: %s",
+				i, wm.Role, wantRoles[i], data)
+		}
+	}
+
+	// Assistant turn 1: tool_calls only, reasoning from this turn only.
+	if len(msgs[2].ToolCalls) != 1 || msgs[2].ToolCalls[0].ID != "tu_1" {
+		t.Errorf("messages[2].tool_calls = %+v, want single call tu_1", msgs[2].ToolCalls)
+	}
+	if msgs[2].ReasoningContent != "I should call the weather tool" {
+		t.Errorf("messages[2].reasoning_content = %q, want thinking of turn 1 only", msgs[2].ReasoningContent)
+	}
+
+	// Tool result is its own "tool" message tied to the right call.
+	if msgs[3].ToolCallID != "tu_1" {
+		t.Errorf("messages[3].tool_call_id = %q, want tu_1", msgs[3].ToolCallID)
+	}
+
+	// Assistant turn 2: text + its own reasoning; no tool_calls leaking in.
+	if string(msgs[4].Content) != `"It is sunny, 25C"` {
+		t.Errorf("messages[4].content = %s, want \"It is sunny, 25C\"", msgs[4].Content)
+	}
+	if msgs[4].ReasoningContent != "Now I can answer" {
+		t.Errorf("messages[4].reasoning_content = %q, want thinking of turn 2 only", msgs[4].ReasoningContent)
+	}
+	if len(msgs[4].ToolCalls) != 0 {
+		t.Errorf("messages[4].tool_calls = %+v, want none", msgs[4].ToolCalls)
+	}
+
+	// Assistant turn 3: plain text, no reasoning from earlier turns.
+	if string(msgs[6].Content) != `"Checking..."` {
+		t.Errorf("messages[6].content = %s, want \"Checking...\"", msgs[6].Content)
+	}
+	if msgs[6].ReasoningContent != "" {
+		t.Errorf("messages[6].reasoning_content = %q, want none for a text-only turn", msgs[6].ReasoningContent)
+	}
+}
+
+// TestAnthropicToOpenAIChat_MultiTurnHistory_PrefixStability locks in the
+// property that prefix-caching providers rely on: as the conversation grows,
+// the serialization of the earlier turns must stay byte-identical between
+// consecutive requests. If a shared-history message changes between turns
+// (reordering, dropped fields, unstable indices), every request misses the
+// prompt cache from the first divergent token onward.
+func TestAnthropicToOpenAIChat_MultiTurnHistory_PrefixStability(t *testing.T) {
+	prefix := `[
+		{"role": "user", "content": [{"type": "text", "text": "Weather in Beijing?"}]},
+		{"role": "assistant", "content": [
+			{"type": "thinking", "thinking": "call the tool", "signature": "sig1"},
+			{"type": "tool_use", "id": "tu_1", "name": "get_weather", "input": {"city": "Beijing"}}
+		]},
+		{"role": "user", "content": [
+			{"type": "tool_result", "tool_use_id": "tu_1", "content": "Sunny 25C"}
+		]},
+		{"role": "assistant", "content": [
+			{"type": "thinking", "thinking": "now answer", "signature": "sig2"},
+			{"type": "text", "text": "It is sunny, 25C"}
+		]}
+	]`
+
+	encode := func(messagesJSON string) []json.RawMessage {
+		t.Helper()
+		body := fmt.Sprintf(`{"model":"claude-sonnet-4-20250514","max_tokens":1024,"messages":%s}`, messagesJSON)
+		irReq, err := DecodeAnthropicRequest([]byte(body))
+		if err != nil {
+			t.Fatalf("decode anthropic: %v", err)
+		}
+		data, err := EncodeOpenAIChatRequest(irReq)
+		if err != nil {
+			t.Fatalf("encode openai chat: %v", err)
+		}
+		var raw struct {
+			Messages []json.RawMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("unmarshal outbound: %v", err)
+		}
+		return raw.Messages
+	}
+
+	turnN := encode(prefix)
+
+	grown := strings.TrimSuffix(prefix, "]") + `,
+		{"role": "user", "content": [{"type": "text", "text": "Thanks!"}]},
+		{"role": "assistant", "content": [{"type": "text", "text": "Anytime."}]},
+		{"role": "user", "content": [{"type": "text", "text": "One more thing"}]}
+	]`
+	turnNPlus1 := encode(grown)
+
+	if len(turnNPlus1) != len(turnN)+3 {
+		t.Fatalf("turn N+1 has %d messages, want %d+3", len(turnNPlus1), len(turnN))
+	}
+	for i := 0; i < len(turnN); i++ {
+		if !bytes.Equal(turnN[i], turnNPlus1[i]) {
+			t.Errorf("shared-prefix message[%d] not byte-identical across turns — this invalidates the provider prompt cache:\n  turn N:   %s\n  turn N+1: %s",
+				i, turnN[i], turnNPlus1[i])
+		}
 	}
 }
 

@@ -73,6 +73,11 @@ type Message struct {
 }
 
 // ContentBlock represents a single content block in the Anthropic API.
+//
+// ExtraFields captures block-level fields this struct does not model explicitly —
+// most importantly cache_control, the prompt-caching breakpoint marker. Dropping
+// it silently disables prompt caching for the whole request, so unknown fields are
+// preserved through a round-trip via custom (Un)MarshalJSON rather than discarded.
 type ContentBlock struct {
 	Type string `json:"type"`
 
@@ -102,6 +107,71 @@ type ContentBlock struct {
 
 	// citations (response path only)
 	Citations []json.RawMessage `json:"citations,omitempty"`
+
+	// ExtraFields holds block fields not modelled above (e.g. cache_control).
+	ExtraFields map[string]json.RawMessage `json:"-"`
+}
+
+// contentBlockAlias mirrors ContentBlock without the custom marshaller, so the
+// (Un)MarshalJSON methods below can delegate the known-field work to encoding/json
+// without recursing.
+type contentBlockAlias ContentBlock
+
+// contentBlockKnownFields lists the JSON keys modelled by ContentBlock. Anything
+// else found on the wire lands in ExtraFields.
+var contentBlockKnownFields = map[string]bool{
+	"type": true, "text": true, "source": true, "id": true, "name": true,
+	"input": true, "tool_use_id": true, "content": true, "is_error": true,
+	"error_code": true, "thinking": true, "signature": true, "data": true,
+	"citations": true,
+}
+
+func (b ContentBlock) MarshalJSON() ([]byte, error) {
+	known, err := json.Marshal(contentBlockAlias(b))
+	if err != nil {
+		return nil, err
+	}
+	if len(b.ExtraFields) == 0 {
+		return known, nil
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(known, &merged); err != nil {
+		return nil, err
+	}
+	// Known fields win: ExtraFields is only a carrier for unmodelled keys, and a
+	// stale duplicate there must not override the IR-derived value.
+	for k, v := range b.ExtraFields {
+		if _, exists := merged[k]; !exists {
+			merged[k] = v
+		}
+	}
+	return json.Marshal(merged)
+}
+
+func (b *ContentBlock) UnmarshalJSON(data []byte) error {
+	var alias contentBlockAlias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return err
+	}
+	*b = ContentBlock(alias)
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for k := range raw {
+		if contentBlockKnownFields[k] {
+			delete(raw, k)
+		}
+	}
+	// Reset rather than merge, so decoding into a reused value cannot retain
+	// stale extras from a previous payload.
+	if len(raw) > 0 {
+		b.ExtraFields = raw
+	} else {
+		b.ExtraFields = nil
+	}
+	return nil
 }
 
 // Source represents the source of image or document content.

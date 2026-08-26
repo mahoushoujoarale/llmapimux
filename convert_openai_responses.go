@@ -301,6 +301,10 @@ func decodeOaiRespInput(raw json.RawMessage) ([]Message, []ContentPart, error) {
 
 	var messages []Message
 	var devParts []ContentPart
+	// Only the leading run of developer/system items is hoisted into the system
+	// prompt. A later one is a mid-conversation instruction whose position carries
+	// meaning, so it stays in place as a RoleSystem message.
+	systemPrefix := true
 
 	for i, item := range items {
 		// EasyInputMessageParam omits "type" when using omitzero; infer "message" from role.
@@ -310,13 +314,23 @@ func decodeOaiRespInput(raw json.RawMessage) ([]Message, []ContentPart, error) {
 		}
 		switch itemType {
 		case "message":
+			if item.Role != "developer" && item.Role != "system" {
+				systemPrefix = false
+			}
 			switch item.Role {
-			case "developer":
+			case "developer", "system":
 				parts, err := decodeOaiRespMessageContent(item.Content)
 				if err != nil {
-					return nil, nil, fmt.Errorf("input[%d] developer content: %w", i, err)
+					return nil, nil, fmt.Errorf("input[%d] %s content: %w", i, item.Role, err)
 				}
-				devParts = append(devParts, parts...)
+				if systemPrefix {
+					devParts = append(devParts, parts...)
+					continue
+				}
+				messages = append(messages, Message{
+					Role:    RoleSystem,
+					Content: parts,
+				})
 
 			case "user":
 				parts, err := decodeOaiRespMessageContent(item.Content)
@@ -789,6 +803,20 @@ func encodeOaiRespMessage(m Message) []openairesponses.InputItem {
 			}
 		}
 		return items
+
+	case RoleSystem:
+		// Mid-conversation system message, kept at its original position by the
+		// decoder. The Responses API expresses this as a developer-role item;
+		// instructions is reserved for the hoisted leading system prompt.
+		content := encodeOaiRespContentParts(m.Content, "input_text")
+		data, _ := json.Marshal(content)
+		return []openairesponses.InputItem{
+			{
+				Type:    "message",
+				Role:    "developer",
+				Content: data,
+			},
+		}
 
 	default:
 		content := encodeOaiRespContentParts(m.Content, "input_text")
