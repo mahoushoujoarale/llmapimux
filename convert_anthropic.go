@@ -1083,6 +1083,18 @@ func DecodeAnthropicStreamEvent(eventType string, data []byte) (*StreamEvent, er
 		usage := Usage{
 			CompletionTokens: raw.Usage.OutputTokens,
 		}
+		// Spec-compliant upstreams only carry output_tokens here (input/cache
+		// usage arrives on message_start), but some Anthropic-compatible
+		// gateways repeat or only send the full usage map on message_delta.
+		// Preserve the input-side fields so they are not silently dropped;
+		// mergeStreamUsage only overwrites non-zero values, so spec-compliant
+		// upstreams (zero input fields here) keep their message_start usage.
+		if raw.Usage.InputTokens > 0 || raw.Usage.CacheCreationInputTokens > 0 || raw.Usage.CacheReadInputTokens > 0 {
+			usage.PromptTokens = raw.Usage.InputTokens + raw.Usage.CacheCreationInputTokens + raw.Usage.CacheReadInputTokens
+			usage.PromptCacheWriteTokens = raw.Usage.CacheCreationInputTokens
+			usage.PromptCacheHitTokens = raw.Usage.CacheReadInputTokens
+			usage.ServerToolUseTokens = raw.Usage.ServerToolUseTokens
+		}
 		event := &StreamEvent{
 			Type:       StreamEventDelta,
 			StopReason: &stopReason,
