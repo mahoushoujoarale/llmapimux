@@ -18,7 +18,7 @@
 ## 安装
 
 ```bash
-go get github.com/llmapimux/llmapimux
+go get github.com/mahoushoujoarale/llmapimux
 ```
 
 需要 Go 1.21+。
@@ -32,7 +32,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/llmapimux/llmapimux"
+	"github.com/mahoushoujoarale/llmapimux"
 )
 
 // SimpleRouter 将所有请求路由到单个 OpenAI 兼容的后端。

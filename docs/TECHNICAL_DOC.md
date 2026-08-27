@@ -2,7 +2,7 @@
 
 > **版本**: v0.x (开发中)  
 > **语言**: Go  
-> **模块路径**: `github.com/llmapimux/llmapimux`  
+> **模块路径**: `github.com/mahoushoujoarale/llmapimux`  
 > **许可证**: MIT
 
 ---
@@ -984,7 +984,7 @@ package main
 import (
     "net/http"
     
-    llmapimux "github.com/llmapimux/llmapimux"
+    llmapimux "github.com/mahoushoujoarale/llmapimux"
 )
 
 func main() {

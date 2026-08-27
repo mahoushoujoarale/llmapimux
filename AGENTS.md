@@ -4,7 +4,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## Project Overview
 
-`github.com/llmapimux/llmapimux` is a Go SDK providing `http.Handler` implementations for proxying LLM API requests across 4 protocols: OpenAI Chat Completions, OpenAI Responses API, Anthropic Messages, and Gemini GenerateContent. It uses a unified intermediate representation (IR) pipeline for request/response normalization and protocol conversion across all routes.
+`github.com/mahoushoujoarale/llmapimux` is a Go SDK providing `http.Handler` implementations for proxying LLM API requests across 4 protocols: OpenAI Chat Completions, OpenAI Responses API, Anthropic Messages, and Gemini GenerateContent. It uses a unified intermediate representation (IR) pipeline for request/response normalization and protocol conversion across all routes.
 
 ## Build & Test Commands
 

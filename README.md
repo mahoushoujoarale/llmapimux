@@ -18,7 +18,7 @@ Any inbound protocol can be routed to any outbound protocol — llmapimux handle
 ## Installation
 
 ```bash
-go get github.com/llmapimux/llmapimux
+go get github.com/mahoushoujoarale/llmapimux
 ```
 
 Requires Go 1.21+.
@@ -32,7 +32,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/llmapimux/llmapimux"
+	"github.com/mahoushoujoarale/llmapimux"
 )
 
 // SimpleRouter routes all requests to a single OpenAI-compatible backend.
