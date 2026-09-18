@@ -236,6 +236,40 @@ func TestDecodeOpenAIResponsesRequest_FunctionCalls(t *testing.T) {
 	}
 }
 
+func TestDecodeOpenAIResponsesRequest_FunctionCallOutputArray(t *testing.T) {
+	// Some clients send function_call_output.output as an array of content
+	// parts instead of a plain string. Decoding used to fail with
+	// "cannot unmarshal array into Go struct field InputItem.output of type string".
+	body := []byte(`{
+		"model": "gpt-4o",
+		"input": [
+			{"type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": "{\"path\":\"/tmp\"}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": [
+				{"type": "output_text", "text": "file contents here"}
+			]}
+		]
+	}`)
+
+	req, err := DecodeOpenAIResponsesRequest(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(req.Messages) != 2 {
+		t.Fatalf("Messages len = %d, want 2", len(req.Messages))
+	}
+	tr := req.Messages[1].Content[0]
+	if tr.Type != ContentTypeToolResult {
+		t.Fatalf("Messages[1].Content[0].Type = %q, want %q", tr.Type, ContentTypeToolResult)
+	}
+	if tr.ToolResult.ToolUseID != "call_1" {
+		t.Errorf("ToolResult.ToolUseID = %q, want %q", tr.ToolResult.ToolUseID, "call_1")
+	}
+	if len(tr.ToolResult.Content) != 1 || tr.ToolResult.Content[0].Text.Text != "file contents here" {
+		t.Errorf("ToolResult.Content = %+v, want text 'file contents here'", tr.ToolResult.Content)
+	}
+}
+
 func TestDecodeOpenAIResponsesRequest_Tools(t *testing.T) {
 	body := []byte(`{
 		"model": "gpt-4o",

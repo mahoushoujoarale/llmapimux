@@ -1,6 +1,10 @@
 package openairesponses
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
 
 // Request is the JSON structure of an OpenAI Responses API request.
 type Request struct {
@@ -150,13 +154,50 @@ type InputItem struct {
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
-	Output    string          `json:"output,omitempty"`
+	Output    ItemOutput      `json:"output,omitempty"`
 	// Reasoning item fields. EncryptedContent carries opaque reasoning payloads
 	// (used to round-trip Anthropic redacted_thinking); Signature carries the
 	// Anthropic thinking signature, which must be replayed verbatim.
 	Summary          []ReasoningSummary `json:"summary,omitempty"`
 	EncryptedContent string             `json:"encrypted_content,omitempty"`
 	Signature        string             `json:"signature,omitempty"`
+}
+
+// ItemOutput is the output field of an input item (e.g. function_call_output).
+// The Responses API accepts either a plain string or an array of content parts
+// ({"type":"output_text","text":"..."}), so unmarshalling must tolerate both.
+// Non-text parts in the array form are dropped, matching the project-wide rule
+// that content unrepresentable in the IR is silently discarded.
+type ItemOutput string
+
+func (o *ItemOutput) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || data[0] == 'n' { // null
+		*o = ""
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*o = ItemOutput(s)
+		return nil
+	}
+	if data[0] == '[' {
+		var parts []ContentPart
+		if err := json.Unmarshal(data, &parts); err != nil {
+			return err
+		}
+		var texts []string
+		for _, p := range parts {
+			if p.Text != "" {
+				texts = append(texts, p.Text)
+			}
+		}
+		*o = ItemOutput(strings.Join(texts, "\n"))
+		return nil
+	}
+	return fmt.Errorf("output must be a string or an array of content parts, got: %s", string(data))
 }
 
 // ContentPart represents a content part in an input message.

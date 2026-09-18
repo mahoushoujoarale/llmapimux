@@ -253,3 +253,61 @@ func TestInputItem_ReasoningFieldsRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// --- InputItem.Output string-or-array tolerance ---
+
+// function_call_output.output is a string on the Responses API, but clients
+// (and the API's own output replayed back into input) may send an array of
+// content parts instead. Unmarshalling must accept both.
+func TestInputItem_OutputAcceptsStringAndArray(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want string
+	}{
+		{"string", `"42"`, "42"},
+		{"null", `null`, ""},
+		{"array one part", `[{"type":"output_text","text":"42"}]`, "42"},
+		{"array multi parts", `[{"type":"output_text","text":"a"},{"type":"output_text","text":"b"}]`, "a\nb"},
+		{"array non-text dropped", `[{"type":"input_image","image_url":"x"},{"type":"output_text","text":"ok"}]`, "ok"},
+		{"array empty", `[]`, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var item InputItem
+			if err := json.Unmarshal([]byte(`{"type":"function_call_output","call_id":"c1","output":`+c.json+`}`), &item); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if string(item.Output) != c.want {
+				t.Errorf("Output = %q, want %q", item.Output, c.want)
+			}
+		})
+	}
+}
+
+func TestInputItem_OutputStillMarshalsAsString(t *testing.T) {
+	out, err := json.Marshal(InputItem{Type: "function_call_output", CallID: "c1", Output: "42"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if string(m["output"]) != `"42"` {
+		t.Errorf("output = %s, want \"42\"", m["output"])
+	}
+
+	// An empty output must stay omitted (omitempty applies to the named string type).
+	out, err = json.Marshal(InputItem{Type: "message", Role: "user"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	m = nil
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := m["output"]; ok {
+		t.Errorf("output emitted when empty: %s", out)
+	}
+}

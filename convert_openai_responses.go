@@ -389,7 +389,7 @@ func decodeOaiRespInput(raw json.RawMessage) ([]Message, []ContentPart, error) {
 						ToolResult: &ToolResultContent{
 							ToolUseID: item.CallID,
 							Content: []ContentPart{
-								{Type: ContentTypeText, Text: &TextContent{Text: item.Output}},
+								{Type: ContentTypeText, Text: &TextContent{Text: string(item.Output)}},
 							},
 						},
 					},
@@ -709,7 +709,7 @@ func encodeOaiRespMessage(m Message) []openairesponses.InputItem {
 				items = append(items, openairesponses.InputItem{
 					Type:   "function_call_output",
 					CallID: p.ToolResult.ToolUseID,
-					Output: toolResultTextWithError(p.ToolResult),
+					Output: openairesponses.ItemOutput(toolResultTextWithError(p.ToolResult)),
 				})
 			} else {
 				msgParts = append(msgParts, p)
@@ -798,7 +798,7 @@ func encodeOaiRespMessage(m Message) []openairesponses.InputItem {
 				items = append(items, openairesponses.InputItem{
 					Type:   "function_call_output",
 					CallID: p.ToolResult.ToolUseID,
-					Output: toolResultTextWithError(p.ToolResult),
+					Output: openairesponses.ItemOutput(toolResultTextWithError(p.ToolResult)),
 				})
 			}
 		}
